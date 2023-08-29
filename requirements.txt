@@ -10,3 +10,4 @@ jupyterlab
 numpy
 matplotlib
 pandas
+opencv-python
