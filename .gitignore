@@ -1,5 +1,6 @@
 # repo specific directories that should not be included
 data/
+media/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
