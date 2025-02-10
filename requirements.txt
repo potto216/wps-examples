@@ -12,3 +12,10 @@ matplotlib
 pandas
 opencv-python
 scikit-image
+scapy
+plotly
+pyshark
+streamlit
+soundfile
+networkx
+mplcursors
