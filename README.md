@@ -18,8 +18,7 @@ This repository is a collection of examples for automation tasks using [Teledyne
 
 # Setup
 
-After cloning the repository, follow these steps to pull and configure the submodule:
-
+After cloning the repository, follow these steps to pull the wpshelper submodule to ensure it matches the exact version tracked:
 ```
 git submodule update --init --recursive
 Submodule 'wpshelper' (git@github.com:potto216/wpshelper.git) registered for path 'wpshelper'
@@ -27,10 +26,14 @@ Cloning into '/home/user/bluetooth/wps/wps_bluetooth_examples/wpshelper'...
 Submodule path 'wpshelper': checked out 'a846e7f14a876227d6198bbca53e598942c73f3c'
 ```
 
-To update wpshelper to the latest commit on main use
-
+After initialization to update wpshelper to the latest commit used by main use
 ```
 git submodule update --init --recursive
+```
+
+If you need to use the latest version of wpshelper from its remote repository rather than the specifically pinned versions (for example you are going to make a contribution) then use:
+```
+git submodule update --recursive --remote
 ```
 
 ## Contributing

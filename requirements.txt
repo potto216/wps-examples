@@ -19,3 +19,4 @@ streamlit
 soundfile
 networkx
 mplcursors
+pyserial
