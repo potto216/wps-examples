@@ -33,9 +33,10 @@ git submodule update --init --recursive
 
 If you need to use the latest version of wpshelper from its remote repository rather than the specifically pinned versions (for example you are going to make a contribution) then use:
 ```
+# use sync if making changes to .gitmodules
+git submodule sync
 git submodule update --recursive --remote
 ```
-
 ## Contributing
 
 Contributions are welcome! If you have ideas or improvements, feel free to open an issue or submit a pull request.
