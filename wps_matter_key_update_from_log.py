@@ -4,6 +4,7 @@ import time
 import datetime
 import serial
 import sys
+import os
 
 module_path = os.path.abspath(os.path.join('./wpshelper'))
 if module_path not in sys.path:
@@ -24,7 +25,7 @@ personality_key = personality_key.strip()
 
 # Setup paths (modify these to suit your environment)
 wps_path = r'C:\Program Files (x86)\Teledyne LeCroy Wireless\Wireless Protocol Suite 4.30 (BETA)'
-data_path = r'C:\Users\Public\Documents\share\input'
+data_path = r'C:\Users\Public\Documents\Teledyne LeCroy Wireless\My Capture Files'
 
 # Create a unique capture name using the current date and time
 current_datetime = datetime.datetime.now()
@@ -91,8 +92,8 @@ def main(args):
     # ----------------- Start WPS Capture using API functions -----------------
     wps_handle = wps_open(tcp_ip=TCP_IP, tcp_port=TCP_PORT, max_to_read=MAX_TO_READ,
                           wps_executable_path=wps_executable_path, personality_key=personality_key)
-    wps_configure(wps_handle, personality_key, capture_technology)
-    wps_start_record(wps_handle)
+    wps_configure(wps_handle, personality_key, capture_technology, show_log=True)
+    wps_start_record(wps_handle, show_log=True)
     # -------------------------------------------------------------------------
 
     last_update_time = time.time() - args.min_duration  # Force an immediate file update
