@@ -18,6 +18,12 @@ This repository is a collection of examples for automation tasks using [Teledyne
 
 # Setup
 
+Clone the repository with
+```
+git clone --recursive https://github.com/potto216/wps-examples.git
+```
+To include the submodules. If you have problems the following may be helpful
+
 After cloning the repository, follow these steps to pull the wpshelper submodule to ensure it matches the exact version tracked:
 ```
 git submodule update --init --recursive
