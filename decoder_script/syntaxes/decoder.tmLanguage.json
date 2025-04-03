@@ -1,0 +1,38 @@
+{
+    "scopeName": "source.decoderscript",
+    "name": "DecoderScript",
+    "patterns": [
+      {
+        "name": "keyword.control.decoderscript",
+        "match": "\\b(?:DECODE|TABLE|ENDTABLE|FIELD|GROUP|RESERVED|BRANCH|NEXT_PROTOCOL|NEXT_PROTOCOL_SIZE|FRAME_AFTER_DECODING|FRAME_BEFORE_DECODING|RECOGNIZER|PAYLOAD_IS_BYTE_STREAM|BYTE_STREAM_FRAMER|IN_SUMMARY|IN_SUMMARY_ONLY|IN_COLLAPSED|START_BIT|NO_MOVE|IF|NOT|ELSE_SKIP|PRINT_IF|RETRIEVE|PROCESSING|STORE|PREPROCESSING|POSTPROCESSING|ALSO)\\b"
+      },
+      {
+        "name": "constant.numeric.decoderscript",
+        "match": "\\b0x[0-9a-fA-F]+\\b|\\b\\d+\\b"
+      },
+      {
+        "name": "string.quoted.double.decoderscript",
+        "begin": "\"",
+        "end": "\"",
+        "patterns": [
+          {
+            "name": "constant.character.escape.decoderscript",
+            "match": "\\\\."
+          }
+        ]
+      },
+      {
+        "name": "comment.block.decoderscript",
+        "begin": "/\\*",
+        "end": "\\*/"
+      },
+      {
+        "name": "comment.line.double-slash.decoderscript",
+        "begin": "//",
+        "end": "$"
+      }
+    ],
+    "repository": {},
+    "injections": {}
+  }
+  

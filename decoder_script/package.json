@@ -1,0 +1,31 @@
+{
+    "name": "decoder-script-syntax",
+    "displayName": "DecoderScript Syntax",
+    "description": "Syntax highlighting for DecoderScript files",
+    "version": "0.0.1",
+    "publisher": "yourPublisherName",
+    "engines": {
+      "vscode": "^1.50.0"
+    },
+    "categories": [
+      "Programming Languages"
+    ],
+    "contributes": {
+      "languages": [
+        {
+          "id": "decoderscript",
+          "aliases": ["DecoderScript", "decoder script"],
+          "extensions": [".dec", ".decoder"],
+          "configuration": "./language-configuration.json"
+        }
+      ],
+      "grammars": [
+        {
+          "language": "decoderscript",
+          "scopeName": "source.decoderscript",
+          "path": "./syntaxes/decoder.tmLanguage.json"
+        }
+      ]
+    }
+  }
+  
