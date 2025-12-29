@@ -15,6 +15,11 @@ This repository is a collection of examples for automation tasks using [Teledyne
 - **`test_automation_le_single_step.ipynb`**  
   A step-by-step example demonstrating how to capture Bluetooth LE traffic without using the WPS helper functions.
 
+- **`analysis/pcapng_analysis.py`**  
+  JSON-centric Bluetooth LE pcapng analysis helpers that can be reused in notebooks such as
+  `show_le_pcapng.ipynb` and in scripts under `analysis/`. See `analysis/README.md` for usage
+  and schema details.
+
 
 # Setup
 
