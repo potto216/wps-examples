@@ -2,7 +2,7 @@
 
 The `analysis/pcapng_analysis.py` module provides a JSON-centric API for Bluetooth LE
 pcapng captures. It is intended to be reused by notebooks such as
-`show_le_pcapng.ipynb` and analysis scripts under `analysis/`.
+`notebooks/analysis/show_le_pcapng.ipynb` and analysis scripts under `analysis/`.
 
 ## Key Features
 
