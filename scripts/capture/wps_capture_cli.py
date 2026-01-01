@@ -21,6 +21,7 @@ from wpshelper import (
     wps_analyze_capture,
     wps_save_capture,
     wps_close,
+    wps_find_installations,
 )
 
 # Default to localhost because FTSAutoServer.exe is started on this machine.
@@ -32,7 +33,7 @@ MAX_TO_READ = 1000
 SLEEP_TIME = 2
 MAX_WAIT_TIME = 60
 
-DEFAULT_WPS_PATH = r"C:\Program Files (x86)\Teledyne LeCroy Wireless\Wireless Protocol Suite 4.50"
+DEFAULT_WPS_BASE_DIR = r"C:\Program Files (x86)\Teledyne LeCroy Wireless"
 DEFAULT_DATA_PATH = r"C:\Users\Public\Documents\Teledyne LeCroy Wireless\My Capture Files"
 
 LOG_LEVELS = {"debug", "info", "warning", "error", "critical"}
@@ -166,6 +167,16 @@ def validate_args(args: argparse.Namespace) -> None:
 
 
 def main() -> None:
+    wps_installations = wps_find_installations(base_dir=DEFAULT_WPS_BASE_DIR, show_log=False)
+    latest_install = (wps_installations or {}).get("latest") or {}
+    
+    # Keep the constant in sync for any downstream code that references it.
+    global DEFAULT_WPS_PATH
+    DEFAULT_WPS_PATH = r"C:\Program Files (x86)\Teledyne LeCroy Wireless\Wireless Protocol Suite 4.50"
+    default_wps_path = latest_install.get("path") or DEFAULT_WPS_PATH
+
+    DEFAULT_WPS_PATH = default_wps_path
+
     parser = argparse.ArgumentParser(
         description="Start a WPS capture for Bluetooth LE and BR/EDR and stop on keypress."
     )
@@ -183,7 +194,11 @@ def main() -> None:
     parser.add_argument("--log-file", required=True, help="Path to the log file.")
     parser.add_argument("--stop-key", default="q", help="Key to stop the capture.")
     parser.add_argument("--auto-server-path", help="Path to FTSAutoServer.exe.")
-    parser.add_argument("--wps-path", default=DEFAULT_WPS_PATH, help="Base path for WPS install.")
+    parser.add_argument(
+        "--wps-path",
+        default=DEFAULT_WPS_PATH,
+        help="Base path for WPS install (defaults to latest detected installation when available).",
+    )
     parser.add_argument("--extension", default=".cfax", help="Capture file extension (default: .cfax).")
     parser.add_argument(
         "--tcp-ip",
@@ -215,6 +230,9 @@ def main() -> None:
     validate_args(args)
     logger = configure_logging(args.log_level, args.log_file)
 
+    logger.info("WPS installations scan (base_dir=%s):\n%s", DEFAULT_WPS_BASE_DIR, json.dumps(wps_installations, indent=2, sort_keys=True))
+    logger.info("Default WPS path selected: %s", DEFAULT_WPS_PATH)
+
     capture_technology = build_capture_technology(args)
     capture_file = make_capture_filename(
         args.prefix, args.equipment, capture_technology, args.data_path, args.extension
@@ -231,6 +249,7 @@ def main() -> None:
             "wps_executable_path": wps_executable_path,
             "auto_server_path": auto_server_path,
             "max_to_read": MAX_TO_READ,
+            "wps_installations": wps_installations,
         },
     }
     logger.info("Effective configuration:\n%s", json.dumps(effective_config, indent=2, sort_keys=True))
