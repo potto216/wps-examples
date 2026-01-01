@@ -1,0 +1,79 @@
+# Scripts
+
+This directory contains standalone scripts that automate common WPS workflows.
+
+## Prerequisites
+
+* Python 3.8+
+* The `wpshelper` submodule initialized (`git submodule update --init --recursive`).
+* Teledyne LeCroy WPS installed for capture workflows.
+* For capture automation, the WPS automation server (`FTSAutoServer.exe`) must be available.
+
+## Capture: `capture/wps_capture_cli.py`
+
+Starts a WPS capture, waits for a keypress, then stops and saves the capture.
+
+**Key options**
+
+* `--log-file` (required): where to write logs.
+* `--data-path`: directory where `.cfax` files are saved.
+* `--equipment`: `X240`, `X500`, or `X600`.
+* `--le`, `--bredr`: enable/disable technologies.
+* `--capture-technology`: provide a full `capturetechnology=...` string.
+* `--auto-server-path`: path to `FTSAutoServer.exe` if not in the default WPS install.
+
+**Example**
+
+```bash
+python scripts/capture/wps_capture_cli.py \
+  --equipment X500 \
+  --log-file capture.log \
+  --data-path "C:\\Users\\Public\\Documents\\Teledyne LeCroy Wireless\\My Capture Files" \
+  --le \
+  --bredr
+```
+
+To provide a custom capture technology string:
+
+```bash
+python scripts/capture/wps_capture_cli.py \
+  --log-file capture.log \
+  --capture-technology "capturetechnology=bredr-off|le-on|2m-on|spectrum-off|wifi-off|wpan-off" \
+  --data-path "C:\\Users\\Public\\Documents\\Teledyne LeCroy Wireless\\My Capture Files"
+```
+
+## Matter keys: `matter/wps_matter_key_update_from_log.py`
+
+Reads Matter log data (from serial or a file), extracts session keys and source node IDs, and updates WPS with those keys while capturing.
+
+**Key options**
+
+* `--serial_port`: serial port to read (default: `COM1`).
+* `--baud_rate`: baud rate (default: `115200`).
+* `--input_file`: read log data from a file instead of serial.
+* `--update_file_name`: file that receives the JSON mapping updates.
+* `--output_file_name`: raw log output file.
+
+**Example (serial input)**
+
+```bash
+python scripts/matter/wps_matter_key_update_from_log.py \
+  --serial_port COM4 \
+  --baud_rate 115200 \
+  --update_file_name matter_keys.jsonl \
+  --output_file_name matter_serial.log
+```
+
+**Example (file input)**
+
+```bash
+python scripts/matter/wps_matter_key_update_from_log.py \
+  --input_file sample_matter.log \
+  --update_file_name matter_keys.jsonl \
+  --output_file_name matter_parsed.log
+```
+
+## Notes
+
+* Both scripts assume the WPS automation server is reachable at `192.168.58.1:22901` by default.
+* Update the constants near the top of each script if your WPS install path or network setup differs.
