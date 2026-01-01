@@ -33,12 +33,32 @@ python scripts/capture/wps_capture_cli.py \
   --bredr
 ```
 
+Windows PowerShell:
+
+```powershell
+python scripts/capture/wps_capture_cli.py `
+  --equipment X500 `
+  --log-file capture.log `
+  --data-path "C:\\Users\\Public\\Documents\\Teledyne LeCroy Wireless\\My Capture Files" `
+  --le `
+  --bredr
+```
+
 To provide a custom capture technology string:
 
 ```bash
 python scripts/capture/wps_capture_cli.py \
   --log-file capture.log \
   --capture-technology "capturetechnology=bredr-off|le-on|2m-on|spectrum-off|wifi-off|wpan-off" \
+  --data-path "C:\\Users\\Public\\Documents\\Teledyne LeCroy Wireless\\My Capture Files"
+```
+
+Windows PowerShell:
+
+```powershell
+python scripts/capture/wps_capture_cli.py `
+  --log-file capture.log `
+  --capture-technology "capturetechnology=bredr-off|le-on|2m-on|spectrum-off|wifi-off|wpan-off" `
   --data-path "C:\\Users\\Public\\Documents\\Teledyne LeCroy Wireless\\My Capture Files"
 ```
 
@@ -64,12 +84,31 @@ python scripts/matter/wps_matter_key_update_from_log.py \
   --output_file_name matter_serial.log
 ```
 
+Windows PowerShell:
+
+```powershell
+python scripts/matter/wps_matter_key_update_from_log.py `
+  --serial_port COM4 `
+  --baud_rate 115200 `
+  --update_file_name matter_keys.jsonl `
+  --output_file_name matter_serial.log
+```
+
 **Example (file input)**
 
 ```bash
 python scripts/matter/wps_matter_key_update_from_log.py \
   --input_file sample_matter.log \
   --update_file_name matter_keys.jsonl \
+  --output_file_name matter_parsed.log
+```
+
+Windows PowerShell:
+
+```powershell
+python scripts/matter/wps_matter_key_update_from_log.py `
+  --input_file sample_matter.log `
+  --update_file_name matter_keys.jsonl `
   --output_file_name matter_parsed.log
 ```
 

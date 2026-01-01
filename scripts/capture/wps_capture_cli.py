@@ -26,7 +26,7 @@ TCP_IP = "192.168.58.1"
 TCP_PORT = 22901
 MAX_TO_READ = 1000
 
-DEFAULT_WPS_PATH = r"C:\Program Files (x86)\Teledyne LeCroy Wireless\Wireless Protocol Suite 4.30 (BETA)"
+DEFAULT_WPS_PATH = r"C:\Program Files (x86)\Teledyne LeCroy Wireless\Wireless Protocol Suite 4.50"
 DEFAULT_DATA_PATH = r"C:\Users\Public\Documents\Teledyne LeCroy Wireless\My Capture Files"
 
 LOG_LEVELS = {"debug", "info", "warning", "error", "critical"}
