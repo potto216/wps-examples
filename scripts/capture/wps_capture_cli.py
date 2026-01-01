@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import datetime
+import json
 import logging
 import os
 import subprocess
@@ -22,9 +23,14 @@ from wpshelper import (
     wps_close,
 )
 
-TCP_IP = "192.168.58.1"
+# Default to localhost because FTSAutoServer.exe is started on this machine.
+# Override with --tcp-ip if your automation server is remote or bound to a
+# specific interface.
+TCP_IP = "127.0.0.1"
 TCP_PORT = 22901
 MAX_TO_READ = 1000
+SLEEP_TIME = 2
+MAX_WAIT_TIME = 60
 
 DEFAULT_WPS_PATH = r"C:\Program Files (x86)\Teledyne LeCroy Wireless\Wireless Protocol Suite 4.50"
 DEFAULT_DATA_PATH = r"C:\Users\Public\Documents\Teledyne LeCroy Wireless\My Capture Files"
@@ -149,6 +155,14 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("Enable at least one of --le or --bredr (or provide --capture-technology).")
     if not os.path.isdir(args.data_path):
         raise ValueError(f"Data path does not exist: {args.data_path}")
+    if not args.tcp_ip or not str(args.tcp_ip).strip():
+        raise ValueError("--tcp-ip must be a non-empty string.")
+    if not (1 <= args.tcp_port <= 65535):
+        raise ValueError("--tcp-port must be in range 1..65535.")
+    if args.sleep_time <= 0:
+        raise ValueError("--sleep-time must be a positive number of seconds.")
+    if args.max_wait_time <= 0:
+        raise ValueError("--max-wait-time must be a positive number of seconds.")
 
 
 def main() -> None:
@@ -171,6 +185,29 @@ def main() -> None:
     parser.add_argument("--auto-server-path", help="Path to FTSAutoServer.exe.")
     parser.add_argument("--wps-path", default=DEFAULT_WPS_PATH, help="Base path for WPS install.")
     parser.add_argument("--extension", default=".cfax", help="Capture file extension (default: .cfax).")
+    parser.add_argument(
+        "--tcp-ip",
+        default=TCP_IP,
+        help="Automation server IP address (default: 127.0.0.1).",
+    )
+    parser.add_argument(
+        "--tcp-port",
+        type=int,
+        default=TCP_PORT,
+        help=f"Automation server port (default: {TCP_PORT}).",
+    )
+    parser.add_argument(
+        "--sleep-time",
+        type=float,
+        default=SLEEP_TIME,
+        help=f"Socket timeout / poll interval in seconds (default: {SLEEP_TIME}).",
+    )
+    parser.add_argument(
+        "--max-wait-time",
+        type=float,
+        default=MAX_WAIT_TIME,
+        help=f"Max seconds to wait for WPS initialization (default: {MAX_WAIT_TIME}).",
+    )
 
     args = parser.parse_args()
     args.log_level = args.log_level.lower()
@@ -182,20 +219,34 @@ def main() -> None:
     capture_file = make_capture_filename(
         args.prefix, args.equipment, capture_technology, args.data_path, args.extension
     )
-    logger.info("Capture file will be saved to %s", capture_file)
 
     wps_executable_path = os.path.join(args.wps_path, "Executables", "Core")
     auto_server_path = args.auto_server_path or os.path.join(wps_executable_path, "FTSAutoServer.exe")
+
+    effective_config = {
+        "args": vars(args),
+        "derived": {
+            "capture_technology": capture_technology,
+            "capture_file": capture_file,
+            "wps_executable_path": wps_executable_path,
+            "auto_server_path": auto_server_path,
+            "max_to_read": MAX_TO_READ,
+        },
+    }
+    logger.info("Effective configuration:\n%s", json.dumps(effective_config, indent=2, sort_keys=True))
+    logger.info("Capture file will be saved to %s", capture_file)
 
     server_process = None
     try:
         server_process = start_server(auto_server_path, logger)
         wps_handle = wps_open(
-            tcp_ip=TCP_IP,
-            tcp_port=TCP_PORT,
+            tcp_ip=args.tcp_ip,
+            tcp_port=args.tcp_port,
             max_to_read=MAX_TO_READ,
             wps_executable_path=wps_executable_path,
             personality_key=args.equipment,
+            sleep_time=args.sleep_time,
+            max_wait_time=args.max_wait_time,
         )
         if args.equipment.upper() == "X240":
             logger.warning(

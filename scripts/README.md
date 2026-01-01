@@ -21,6 +21,7 @@ Starts a WPS capture, waits for a keypress, then stops and saves the capture.
 * `--le`, `--bredr`: enable/disable technologies.
 * `--capture-technology`: provide a full `capturetechnology=...` string.
 * `--auto-server-path`: path to `FTSAutoServer.exe` if not in the default WPS install.
+* `--tcp-ip`, `--tcp-port`: automation server address (defaults to `127.0.0.1:22901`).
 
 **Example**
 
@@ -37,6 +38,7 @@ Windows PowerShell:
 
 ```powershell
 python scripts/capture/wps_capture_cli.py `
+  --tcp-ip 127.0.0.1 `
   --equipment X500 `
   --log-file capture.log `
   --data-path "C:\\Users\\Public\\Documents\\Teledyne LeCroy Wireless\\My Capture Files" `
