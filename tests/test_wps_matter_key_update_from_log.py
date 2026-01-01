@@ -26,7 +26,12 @@ def load_wps_module():
     sys.modules.setdefault("serial", dummy_serial)
     sys.modules.setdefault("wpshelper", dummy_wpshelper)
 
-    module_path = Path(__file__).resolve().parents[1] / "wps_matter_key_update_from_log.py"
+    module_path = (
+        Path(__file__).resolve().parents[1]
+        / "scripts"
+        / "matter"
+        / "wps_matter_key_update_from_log.py"
+    )
     spec = importlib.util.spec_from_file_location("wps_matter_key_update_from_log", module_path)
     module = importlib.util.module_from_spec(spec)
     if spec.loader is None:
