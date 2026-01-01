@@ -132,6 +132,23 @@ def wait_for_keypress(stop_key: str, logger: logging.Logger) -> None:
             termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
 
 
+def request_console_focus() -> None:
+    if os.name != "nt":
+        return
+    import ctypes
+
+    user32 = ctypes.windll.user32
+    kernel32 = ctypes.windll.kernel32
+    hwnd = kernel32.GetConsoleWindow()
+    if not hwnd:
+        raise RuntimeError("Console window handle not found.")
+    if hasattr(user32, "AllowSetForegroundWindow"):
+        user32.AllowSetForegroundWindow(0xFFFFFFFF)
+    user32.ShowWindow(hwnd, 5)
+    if not user32.SetForegroundWindow(hwnd):
+        raise RuntimeError("Failed to set console window foreground.")
+
+
 def configure_logging(log_level: str, log_file: str) -> logging.Logger:
     logging.basicConfig(
         level=getattr(logging, log_level.upper()),
@@ -274,6 +291,10 @@ def main() -> None:
         wps_configure(wps_handle, args.equipment, capture_technology, show_log=True)
         wps_start_record(wps_handle, show_log=True)
         logger.info("Capture started. Press '%s' to stop.", args.stop_key)
+        try:
+            request_console_focus()
+        except Exception as exc:
+            logger.warning("Unable to request console focus: %s", exc)
         wait_for_keypress(args.stop_key, logger)
         logger.info("Stop key pressed. Stopping capture.")
         wps_stop_record(wps_handle)
