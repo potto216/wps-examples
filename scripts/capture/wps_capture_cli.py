@@ -297,10 +297,10 @@ def main() -> None:
             logger.warning("Unable to request console focus: %s", exc)
         wait_for_keypress(args.stop_key, logger)
         logger.info("Stop key pressed. Stopping capture.")
-        wps_stop_record(wps_handle)
-        wps_analyze_capture(wps_handle)
-        wps_save_capture(wps_handle, capture_file)
-        wps_close(wps_handle)
+        wps_stop_record(wps_handle, show_log=True)
+        wps_analyze_capture(wps_handle,show_log=True)
+        wps_save_capture(wps_handle, capture_file,show_log=True)
+        wps_close(wps_handle, recv_retry_attempts=10, recv_retry_sleep=4,show_log=True)
         logger.info("Capture saved successfully.")
     except Exception as exc:
         logger.exception("Capture failed: %s", exc)
@@ -308,6 +308,24 @@ def main() -> None:
     finally:
         if server_process:
             server_process.terminate()
+            try:
+                server_process.wait(timeout=5)
+                logger.info("Automation server terminated gracefully.")
+            except subprocess.TimeoutExpired:
+                logger.warning("Automation server did not terminate in time, killing it.")
+                server_process.kill()
+        
+        # Also kill any lingering WPS GUI processes
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/IM", "fts.exe"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=5
+            )
+            logger.info("WPS GUI process terminated.")
+        except Exception as exc:
+            logger.debug("Could not kill WPS GUI (may not be running): %s", exc)
 
 
 if __name__ == "__main__":
