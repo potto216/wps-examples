@@ -12,12 +12,46 @@ from scapy.layers.bluetooth import HCI_ACL_Hdr, HCI_Command_Hdr, HCI_Event_Hdr, 
 
 # Scapy's Bluetooth LE layers move across versions.
 try:
-    from scapy.layers.bluetooth4LE import BTLE  # type: ignore
+    # Scapy 2.7 Bluetooth LE layers.
+    from scapy.layers.bluetooth4LE import (  # type: ignore
+        BTLE,
+        BTLE_ADV_DIRECT_IND,
+        BTLE_ADV_IND,
+        BTLE_ADV_NONCONN_IND,
+        BTLE_ADV_SCAN_IND,
+        BTLE_CONNECT_REQ,
+        BTLE_SCAN_REQ,
+        BTLE_SCAN_RSP,
+    )
 except ImportError:  # pragma: no cover
     try:
+        # Some older Scapy installs expose BTLE here, but not all ADV_* layers.
         from scapy.layers.bluetooth import BTLE  # type: ignore
     except ImportError:  # pragma: no cover
         BTLE = None  # type: ignore[assignment]
+
+    BTLE_ADV_DIRECT_IND = None  # type: ignore[assignment]
+    BTLE_ADV_IND = None  # type: ignore[assignment]
+    BTLE_ADV_NONCONN_IND = None  # type: ignore[assignment]
+    BTLE_ADV_SCAN_IND = None  # type: ignore[assignment]
+    BTLE_CONNECT_REQ = None  # type: ignore[assignment]
+    BTLE_SCAN_REQ = None  # type: ignore[assignment]
+    BTLE_SCAN_RSP = None  # type: ignore[assignment]
+
+
+LE_ADV_TYPE_LAYERS: tuple[tuple[object, str], ...] = tuple(
+    (layer, name)
+    for layer, name in (
+        (BTLE_ADV_IND, "adv_ind"),
+        (BTLE_ADV_DIRECT_IND, "adv_direct_ind"),
+        (BTLE_ADV_NONCONN_IND, "adv_nonconn_ind"),
+        (BTLE_ADV_SCAN_IND, "adv_scan_ind"),
+        (BTLE_SCAN_REQ, "scan_req"),
+        (BTLE_SCAN_RSP, "scan_rsp"),
+        (BTLE_CONNECT_REQ, "connect_req"),
+    )
+    if layer is not None
+)
 
 from gps import GpsColumns, interpolate_gps_events, load_gpx, load_kml
 
@@ -66,6 +100,7 @@ def _parse_datetime_arg(value: Optional[str], *, is_stop: bool) -> tuple[Optiona
 
     ts = pd.to_datetime(text, utc=True, errors="raise")
     return ts, False
+
 
 def _parse_time_offset(value: Optional[str]) -> pd.Timedelta:
     """Parse a time offset string into a Timedelta.
@@ -168,8 +203,14 @@ def _load_gps_data(path: str, gps_type: str, *, verbose: bool = False) -> pd.Dat
     return gps_df
 
 
-def _classify_packet(packet: Packet) -> Optional[str]:
+def _classify_packet(packet: Packet, *, detailed_le_adv_types: bool) -> Optional[str]:
     if BTLE is not None and packet.haslayer(BTLE):
+        if detailed_le_adv_types and LE_ADV_TYPE_LAYERS:
+            for layer, name in LE_ADV_TYPE_LAYERS:
+                # NOTE: typing: Scapy's haslayer() accepts either a class or a name.
+                if packet.haslayer(layer):
+                    return name
+            return "le_other"
         return "le"
     if packet.haslayer((HCI_ACL_Hdr, HCI_Command_Hdr, HCI_Event_Hdr, HCI_Hdr, L2CAP_Hdr)):
         return "br_edr"
@@ -180,6 +221,7 @@ def _load_packet_events(
     pcap_path: str,
     *,
     time_offset: pd.Timedelta = pd.Timedelta(0),
+    detailed_le_adv_types: bool = False,
     verbose: bool = False,
 ) -> pd.DataFrame:
     packets = rdpcap(pcap_path)
@@ -200,7 +242,7 @@ def _load_packet_events(
 
     rows = []
     for packet in packets:
-        packet_type = _classify_packet(packet)
+        packet_type = _classify_packet(packet, detailed_le_adv_types=detailed_le_adv_types)
         if packet_type is None:
             continue
         rows.append(
@@ -215,23 +257,46 @@ def _load_packet_events(
     packet_df.attrs["pcap_time_max"] = pcap_ts_max
 
     if verbose:
-        le_count = int((packet_df.get("packet_type") == "le").sum()) if not packet_df.empty else 0
-        br_count = (
-            int((packet_df.get("packet_type") == "br_edr").sum()) if not packet_df.empty else 0
-        )
+        if not packet_df.empty:
+            if detailed_le_adv_types:
+                counts = packet_df["packet_type"].value_counts().to_dict()
+            else:
+                counts = packet_df["packet_type"].value_counts().to_dict()
+        else:
+            counts = {}
+
+        le_count = int(counts.get("le", 0))
+        br_count = int(counts.get("br_edr", 0))
         print(f"Packets read from capture: {total_packets}")
         if time_offset != pd.Timedelta(0):
             # Timedelta string is clear enough for logs (e.g., '0 days 05:00:00').
             print(f"PCAP time offset applied: {time_offset}")
         if pcap_ts_min is not None and pcap_ts_max is not None:
             print(f"PCAP time range (all packets): {_fmt_range(pcap_ts_min, pcap_ts_max)}")
-        print(f"Bluetooth packets classified: {len(packet_df)} (LE={le_count}, BR/EDR={br_count})")
+        if detailed_le_adv_types:
+            non_br = len(packet_df) - br_count
+            print(
+                f"Bluetooth packets classified: {len(packet_df)} (LE detailed={non_br}, BR/EDR={br_count})"
+            )
+            if counts:
+                ordered = dict(sorted(counts.items(), key=lambda kv: kv[0]))
+                print(f"Packet type counts: {ordered}")
+        else:
+            print(f"Bluetooth packets classified: {len(packet_df)} (LE={le_count}, BR/EDR={br_count})")
         if not packet_df.empty:
             ts_min = packet_df["timestamp"].min()
             ts_max = packet_df["timestamp"].max()
             print(f"Packet time range: {_fmt_range(ts_min, ts_max)}")
 
     return packet_df
+
+
+def _type_color_map(types: list[str]) -> dict[str, object]:
+    if not types:
+        return {}
+    cmap_name = "tab10" if len(types) <= 10 else "tab20"
+    cmap = plt.get_cmap(cmap_name)
+    return {t: cmap(i % cmap.N) for i, t in enumerate(sorted(types))}
 
 
 def plot_packets_on_map(gps_df: pd.DataFrame, packet_df: pd.DataFrame, *, verbose: bool = False) -> None:
@@ -267,26 +332,42 @@ def plot_packets_on_map(gps_df: pd.DataFrame, packet_df: pd.DataFrame, *, verbos
         label="GPS Track",
     )
 
-    le_events = events_with_locations[events_with_locations["packet_type"] == "le"]
-    br_events = events_with_locations[events_with_locations["packet_type"] == "br_edr"]
+    types_present = sorted(events_with_locations["packet_type"].dropna().unique().tolist())
+    if types_present == ["br_edr", "le"] or types_present == ["le", "br_edr"]:
+        le_events = events_with_locations[events_with_locations["packet_type"] == "le"]
+        br_events = events_with_locations[events_with_locations["packet_type"] == "br_edr"]
 
-    if not le_events.empty:
-        ax.scatter(
-            le_events[GpsColumns.longitude],
-            le_events[GpsColumns.latitude],
-            color="tab:blue",
-            s=24,
-            label="Bluetooth LE",
-        )
+        if not le_events.empty:
+            ax.scatter(
+                le_events[GpsColumns.longitude],
+                le_events[GpsColumns.latitude],
+                color="tab:blue",
+                s=24,
+                label="Bluetooth LE",
+            )
 
-    if not br_events.empty:
-        ax.scatter(
-            br_events[GpsColumns.longitude],
-            br_events[GpsColumns.latitude],
-            color="tab:orange",
-            s=24,
-            label="Bluetooth BR/EDR",
-        )
+        if not br_events.empty:
+            ax.scatter(
+                br_events[GpsColumns.longitude],
+                br_events[GpsColumns.latitude],
+                color="tab:orange",
+                s=24,
+                label="Bluetooth BR/EDR",
+            )
+    else:
+        color_map = _type_color_map(types_present)
+        for pkt_type in types_present:
+            subset = events_with_locations[events_with_locations["packet_type"] == pkt_type]
+            if subset.empty:
+                continue
+            label = pkt_type if pkt_type != "br_edr" else "br_edr"
+            ax.scatter(
+                subset[GpsColumns.longitude],
+                subset[GpsColumns.latitude],
+                color=color_map.get(pkt_type, "tab:blue"),
+                s=24,
+                label=label,
+            )
 
     ax.set_title("Bluetooth Packet Locations")
     ax.set_xlabel("Longitude")
@@ -343,6 +424,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--color-by-packet-type",
+        action="store_true",
+        help=(
+            "Plot Bluetooth packet locations with a different color per packet type. "
+            "For LE packets, this groups by Scapy 2.7 BTLE_ADV_* / SCAN_* / CONNECT_REQ layers "
+            "when available; otherwise it falls back to a single LE category."
+        ),
+    )
+    parser.add_argument(
         "-v",
         "--verbose",
         action="store_true",
@@ -361,7 +451,12 @@ def main() -> None:
     gps_time_min_loaded = gps_df[GpsColumns.timestamp].min() if not gps_df.empty else None
     gps_time_max_loaded = gps_df[GpsColumns.timestamp].max() if not gps_df.empty else None
 
-    packet_df = _load_packet_events(args.pcapng, time_offset=pcap_time_offset, verbose=args.verbose)
+    packet_df = _load_packet_events(
+        args.pcapng,
+        time_offset=pcap_time_offset,
+        detailed_le_adv_types=bool(args.color_by_packet_type),
+        verbose=args.verbose,
+    )
     pkt_time_min_loaded = packet_df["timestamp"].min() if not packet_df.empty else None
     pkt_time_max_loaded = packet_df["timestamp"].max() if not packet_df.empty else None
 
