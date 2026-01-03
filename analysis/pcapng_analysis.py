@@ -11,29 +11,31 @@ from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from scapy.all import Packet, rdpcap
-from scapy.layers.bluetooth import (
+
+# Scapy 2.7 Bluetooth LE layers.
+from scapy.layers.bluetooth4LE import (  # type: ignore
     BTLE,
-    BTLEAdvertisingHdr,
-    BTLEAdvDirectInd,
-    BTLEAdvExtInd,
-    BTLEAdvInd,
-    BTLEAdvNonconnInd,
-    BTLEAdvScanInd,
-    BTLEConnectReq,
-    BTLEScanReq,
-    BTLEScanRsp,
+    BTLE_ADV,
+    BTLE_ADV_DIRECT_IND,
+    BTLE_ADV_IND,
+    BTLE_ADV_NONCONN_IND,
+    BTLE_ADV_SCAN_IND,
+    BTLE_CONNECT_REQ,
+    BTLE_PPI,
+    BTLE_RF,
+    BTLE_SCAN_REQ,
+    BTLE_SCAN_RSP,
 )
 
 ADV_CHANNELS = {37, 38, 39}
 ADV_TYPE_LAYERS: Tuple[Tuple[type, str], ...] = (
-    (BTLEAdvInd, "adv_ind"),
-    (BTLEAdvDirectInd, "adv_direct_ind"),
-    (BTLEAdvNonconnInd, "adv_nonconn_ind"),
-    (BTLEAdvScanInd, "adv_scan_ind"),
-    (BTLEScanReq, "scan_req"),
-    (BTLEScanRsp, "scan_rsp"),
-    (BTLEConnectReq, "connect_req"),
-    (BTLEAdvExtInd, "adv_ext_ind"),
+    (BTLE_ADV_IND, "adv_ind"),
+    (BTLE_ADV_DIRECT_IND, "adv_direct_ind"),
+    (BTLE_ADV_NONCONN_IND, "adv_nonconn_ind"),
+    (BTLE_ADV_SCAN_IND, "adv_scan_ind"),
+    (BTLE_SCAN_REQ, "scan_req"),
+    (BTLE_SCAN_RSP, "scan_rsp"),
+    (BTLE_CONNECT_REQ, "connect_req"),
 )
 
 ADDRESS_FIELDS = ("AdvA", "ScanA", "InitA", "AAS")
@@ -98,6 +100,11 @@ class PcapngAnalyzer:
         return output_path
 
     def _extract_records(self, packets: Iterable[Packet]) -> List[PacketRecord]:
+        if BTLE is None:
+            raise RuntimeError(
+                "Scapy BTLE layers are unavailable. Install/upgrade Scapy and ensure "
+                "Bluetooth LE layers are present (e.g. scapy.layers.bluetooth4LE)."
+            )
         records: List[PacketRecord] = []
         for packet in packets:
             if not packet.haslayer(BTLE):
@@ -112,10 +119,18 @@ class PcapngAnalyzer:
         channel = None
         rssi = None
         packet_type = "unknown"
-        if packet.haslayer(BTLEAdvertisingHdr):
-            advertising_hdr = packet[BTLEAdvertisingHdr]
-            channel = int(getattr(advertising_hdr, "channel", None) or 0) or None
-            rssi_value = getattr(advertising_hdr, "rssi", None)
+        # Channel/RSSI metadata is typically stored in capture metadata layers.
+        if packet.haslayer(BTLE_PPI):
+            ppi = packet[BTLE_PPI]
+            chan = getattr(ppi, "btle_channel", None)
+            channel = int(chan) if chan is not None else None
+            rssi_value = getattr(ppi, "rssi_avg", None)
+            rssi = int(rssi_value) if rssi_value is not None else None
+        elif packet.haslayer(BTLE_RF):
+            rf = packet[BTLE_RF]
+            chan = getattr(rf, "rf_channel", None)
+            channel = int(chan) if chan is not None else None
+            rssi_value = getattr(rf, "signal", None)
             rssi = int(rssi_value) if rssi_value is not None else None
         for layer, name in ADV_TYPE_LAYERS:
             if packet.haslayer(layer):

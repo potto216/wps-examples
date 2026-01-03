@@ -118,3 +118,13 @@ python scripts/matter/wps_matter_key_update_from_log.py `
 
 * Both scripts assume the WPS automation server is reachable at `192.168.58.1:22901` by default.
 * Update the constants near the top of each script if your WPS install path or network setup differs.
+
+## PCAPNG analysis: `analysis/wps_pcapng_analyze_cli.py`
+
+Analyze a Bluetooth LE `.pcapng` file using Scapy and emit a JSON report.
+
+**Example**
+
+```powershell
+python scripts/analysis/wps_pcapng_analyze_cli.py "D:\path\capture.pcapng" -o report.json
+```
