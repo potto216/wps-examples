@@ -3,7 +3,13 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
+import math
+import os
+from pathlib import Path
 from typing import Optional
+from urllib.request import Request, urlopen
 
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -54,6 +60,178 @@ LE_ADV_TYPE_LAYERS: tuple[tuple[object, str], ...] = tuple(
 )
 
 from gps import GpsColumns, interpolate_gps_events, load_gpx, load_kml
+
+
+WEB_MERCATOR_RADIUS_M = 6378137.0
+OSM_TILE_URL_TEMPLATE = "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
+
+
+def _lonlat_to_web_mercator(lon: float, lat: float) -> tuple[float, float]:
+    lat_clamped = max(min(lat, 85.05112878), -85.05112878)
+    x = WEB_MERCATOR_RADIUS_M * math.radians(lon)
+    y = WEB_MERCATOR_RADIUS_M * math.log(math.tan(math.pi / 4.0 + math.radians(lat_clamped) / 2.0))
+    return x, y
+
+
+def _tile_xy_from_lonlat(lon: float, lat: float, zoom: int) -> tuple[float, float]:
+    lat_clamped = max(min(lat, 85.05112878), -85.05112878)
+    n = 2.0**zoom
+    x = (lon + 180.0) / 360.0 * n
+    lat_rad = math.radians(lat_clamped)
+    y = (1.0 - math.asinh(math.tan(lat_rad)) / math.pi) / 2.0 * n
+    return x, y
+
+
+def _lonlat_from_tile_xy(x: float, y: float, zoom: int) -> tuple[float, float]:
+    n = 2.0**zoom
+    lon = x / n * 360.0 - 180.0
+    lat_rad = math.atan(math.sinh(math.pi * (1.0 - 2.0 * y / n)))
+    lat = math.degrees(lat_rad)
+    return lon, lat
+
+
+def _tile_bounds_mercator(z: int, x: int, y: int) -> tuple[float, float, float, float]:
+    lon_left, lat_top = _lonlat_from_tile_xy(x, y, z)
+    lon_right, lat_bottom = _lonlat_from_tile_xy(x + 1, y + 1, z)
+    x0, y0 = _lonlat_to_web_mercator(lon_left, lat_bottom)
+    x1, y1 = _lonlat_to_web_mercator(lon_right, lat_top)
+    return x0, y0, x1, y1
+
+
+def _basemap_cache_key(
+    *,
+    provider: str,
+    zoom: int,
+    bounds_mercator: tuple[float, float, float, float],
+) -> str:
+    x0, y0, x1, y1 = bounds_mercator
+    payload = f"{provider}|{zoom}|{x0:.2f},{y0:.2f},{x1:.2f},{y1:.2f}".encode("utf-8")
+    return hashlib.sha1(payload).hexdigest()
+
+
+def _download_osm_tile(*, z: int, x: int, y: int, tile_path: Path) -> "Image.Image":
+    # Pillow is typically present via matplotlib, but keep it optional.
+    try:
+        from PIL import Image  # type: ignore
+    except ImportError as exc:  # pragma: no cover
+        raise RuntimeError("Missing dependency: Pillow. Install with 'pip install pillow'.") from exc
+
+    tile_path.parent.mkdir(parents=True, exist_ok=True)
+    if tile_path.exists():
+        return Image.open(tile_path).convert("RGBA")
+
+    url = OSM_TILE_URL_TEMPLATE.format(z=z, x=x, y=y)
+    req = Request(
+        url,
+        headers={
+            "User-Agent": "wps-examples/plot_bluetooth_gps_map",
+            "Accept": "image/png",
+        },
+    )
+    with urlopen(req, timeout=30) as resp:
+        data = resp.read()
+
+    tile_path.write_bytes(data)
+    return Image.open(tile_path).convert("RGBA")
+
+
+def _choose_zoom_for_bounds(bounds_mercator: tuple[float, float, float, float]) -> int:
+    x0, y0, x1, y1 = bounds_mercator
+    width_m = max(1.0, abs(x1 - x0))
+    height_m = max(1.0, abs(y1 - y0))
+    max_dim_m = max(width_m, height_m)
+
+    target_px = 1024.0
+    initial_res = 156543.03392804062
+    z = int(math.floor(math.log2((initial_res * target_px) / max_dim_m)))
+    return max(0, min(19, z))
+
+
+def _load_or_build_osm_basemap(
+    *,
+    bounds_mercator: tuple[float, float, float, float],
+    zoom: Optional[int],
+    cache_dir: Path,
+) -> tuple["Image.Image", tuple[float, float, float, float], int]:
+    try:
+        from PIL import Image  # type: ignore
+    except ImportError as exc:  # pragma: no cover
+        raise RuntimeError("Missing dependency: Pillow. Install with 'pip install pillow'.") from exc
+
+    z = int(zoom) if zoom is not None else _choose_zoom_for_bounds(bounds_mercator)
+    provider = "osm"
+    key = _basemap_cache_key(provider=provider, zoom=z, bounds_mercator=bounds_mercator)
+
+    stitched_dir = cache_dir / "stitched"
+    tiles_dir = cache_dir / "tiles"
+    stitched_png = stitched_dir / f"{key}.png"
+    stitched_json = stitched_dir / f"{key}.json"
+
+    if stitched_png.exists() and stitched_json.exists():
+        meta = json.loads(stitched_json.read_text(encoding="utf-8"))
+        extent = tuple(meta["extent_mercator"])  # type: ignore[assignment]
+        return Image.open(stitched_png).convert("RGBA"), extent, z
+
+    # Convert desired bounds to lon/lat to compute required tile indices.
+    # X is linear with lon in Web Mercator; for Y we use the inverse tile formula.
+    x0, y0, x1, y1 = bounds_mercator
+    lon_left = math.degrees(x0 / WEB_MERCATOR_RADIUS_M)
+    lon_right = math.degrees(x1 / WEB_MERCATOR_RADIUS_M)
+
+    def mercator_y_to_lat(y_m: float) -> float:
+        return math.degrees(2.0 * math.atan(math.exp(y_m / WEB_MERCATOR_RADIUS_M)) - math.pi / 2.0)
+
+    lat_bottom = mercator_y_to_lat(y0)
+    lat_top = mercator_y_to_lat(y1)
+
+    x_min_f, y_max_f = _tile_xy_from_lonlat(lon_left, lat_bottom, z)
+    x_max_f, y_min_f = _tile_xy_from_lonlat(lon_right, lat_top, z)
+
+    x_min = int(math.floor(min(x_min_f, x_max_f)))
+    x_max = int(math.floor(max(x_min_f, x_max_f)))
+    y_min = int(math.floor(min(y_min_f, y_max_f)))
+    y_max = int(math.floor(max(y_min_f, y_max_f)))
+
+    n = 2**z
+    x_min = max(0, min(n - 1, x_min))
+    x_max = max(0, min(n - 1, x_max))
+    y_min = max(0, min(n - 1, y_min))
+    y_max = max(0, min(n - 1, y_max))
+
+    # Download/cache tiles and stitch.
+    tile_size = 256
+    width_tiles = x_max - x_min + 1
+    height_tiles = y_max - y_min + 1
+    stitched = Image.new("RGBA", (width_tiles * tile_size, height_tiles * tile_size))
+
+    for ty in range(y_min, y_max + 1):
+        for tx in range(x_min, x_max + 1):
+            tile_path = tiles_dir / str(z) / str(tx) / f"{ty}.png"
+            tile_img = _download_osm_tile(z=z, x=tx, y=ty, tile_path=tile_path)
+            stitched.paste(tile_img, ((tx - x_min) * tile_size, (ty - y_min) * tile_size))
+
+    # Compute stitched image extent in Web Mercator.
+    left, _, _, top = _tile_bounds_mercator(z, x_min, y_min)
+    _, bottom, right, _ = _tile_bounds_mercator(z, x_max, y_max)
+    extent_merc = (left, right, bottom, top)
+
+    stitched_dir.mkdir(parents=True, exist_ok=True)
+    stitched.save(stitched_png)
+    stitched_json.write_text(
+        json.dumps(
+            {
+                "provider": provider,
+                "zoom": z,
+                "bounds_mercator": list(bounds_mercator),
+                "extent_mercator": list(extent_merc),
+            },
+            indent=2,
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+
+    return stitched, extent_merc, z
 
 
 def _fmt_ts(ts: Optional[pd.Timestamp]) -> str:
@@ -324,13 +502,62 @@ def plot_packets_on_map(gps_df: pd.DataFrame, packet_df: pd.DataFrame, *, verbos
             print(f"Matched by type: LE={le_matched}, BR/EDR={br_matched}")
 
     fig, ax = plt.subplots(figsize=(10, 7))
-    ax.plot(
-        gps_df[GpsColumns.longitude],
-        gps_df[GpsColumns.latitude],
-        color="gray",
-        linewidth=1.5,
-        label="GPS Track",
-    )
+
+    use_basemap = bool(packet_df.attrs.get("use_basemap"))
+    basemap_provider = str(packet_df.attrs.get("basemap_provider") or "none")
+    basemap_zoom = packet_df.attrs.get("basemap_zoom")
+    basemap_cache_dir = Path(str(packet_df.attrs.get("basemap_cache_dir") or ".cache/basemaps"))
+
+    if use_basemap and basemap_provider == "osm":
+        lon_min = float(gps_df[GpsColumns.longitude].min())
+        lon_max = float(gps_df[GpsColumns.longitude].max())
+        lat_min = float(gps_df[GpsColumns.latitude].min())
+        lat_max = float(gps_df[GpsColumns.latitude].max())
+
+        x0, y0 = _lonlat_to_web_mercator(lon_min, lat_min)
+        x1, y1 = _lonlat_to_web_mercator(lon_max, lat_max)
+        left = min(x0, x1)
+        right = max(x0, x1)
+        bottom = min(y0, y1)
+        top = max(y0, y1)
+        pad_x = max(10.0, (right - left) * 0.05)
+        pad_y = max(10.0, (top - bottom) * 0.05)
+        bounds_merc = (left - pad_x, bottom - pad_y, right + pad_x, top + pad_y)
+
+        basemap_img, extent_merc, z = _load_or_build_osm_basemap(
+            bounds_mercator=bounds_merc,
+            zoom=int(basemap_zoom) if basemap_zoom is not None else None,
+            cache_dir=basemap_cache_dir,
+        )
+        if verbose:
+            print(f"Basemap: OpenStreetMap tiles (zoom={z})")
+            print(f"Basemap cache dir: {basemap_cache_dir}")
+
+        ax.imshow(basemap_img, extent=extent_merc, origin="upper")
+
+        # Plot data in Web Mercator to align with tiles.
+        gps_x = []
+        gps_y = []
+        for lon, lat in zip(gps_df[GpsColumns.longitude].tolist(), gps_df[GpsColumns.latitude].tolist()):
+            x, y = _lonlat_to_web_mercator(float(lon), float(lat))
+            gps_x.append(x)
+            gps_y.append(y)
+
+        ax.plot(
+            gps_x,
+            gps_y,
+            color="gray",
+            linewidth=1.5,
+            label="GPS Track",
+        )
+    else:
+        ax.plot(
+            gps_df[GpsColumns.longitude],
+            gps_df[GpsColumns.latitude],
+            color="gray",
+            linewidth=1.5,
+            label="GPS Track",
+        )
 
     types_present = sorted(events_with_locations["packet_type"].dropna().unique().tolist())
     if types_present == ["br_edr", "le"] or types_present == ["le", "br_edr"]:
@@ -338,22 +565,46 @@ def plot_packets_on_map(gps_df: pd.DataFrame, packet_df: pd.DataFrame, *, verbos
         br_events = events_with_locations[events_with_locations["packet_type"] == "br_edr"]
 
         if not le_events.empty:
-            ax.scatter(
-                le_events[GpsColumns.longitude],
-                le_events[GpsColumns.latitude],
-                color="tab:blue",
-                s=24,
-                label="Bluetooth LE",
-            )
+            if use_basemap and basemap_provider == "osm":
+                xs, ys = zip(
+                    *(
+                        _lonlat_to_web_mercator(float(lon), float(lat))
+                        for lon, lat in zip(
+                            le_events[GpsColumns.longitude].tolist(),
+                            le_events[GpsColumns.latitude].tolist(),
+                        )
+                    )
+                )
+                ax.scatter(xs, ys, color="tab:blue", s=24, label="Bluetooth LE")
+            else:
+                ax.scatter(
+                    le_events[GpsColumns.longitude],
+                    le_events[GpsColumns.latitude],
+                    color="tab:blue",
+                    s=24,
+                    label="Bluetooth LE",
+                )
 
         if not br_events.empty:
-            ax.scatter(
-                br_events[GpsColumns.longitude],
-                br_events[GpsColumns.latitude],
-                color="tab:orange",
-                s=24,
-                label="Bluetooth BR/EDR",
-            )
+            if use_basemap and basemap_provider == "osm":
+                xs, ys = zip(
+                    *(
+                        _lonlat_to_web_mercator(float(lon), float(lat))
+                        for lon, lat in zip(
+                            br_events[GpsColumns.longitude].tolist(),
+                            br_events[GpsColumns.latitude].tolist(),
+                        )
+                    )
+                )
+                ax.scatter(xs, ys, color="tab:orange", s=24, label="Bluetooth BR/EDR")
+            else:
+                ax.scatter(
+                    br_events[GpsColumns.longitude],
+                    br_events[GpsColumns.latitude],
+                    color="tab:orange",
+                    s=24,
+                    label="Bluetooth BR/EDR",
+                )
     else:
         color_map = _type_color_map(types_present)
         for pkt_type in types_present:
@@ -361,17 +612,39 @@ def plot_packets_on_map(gps_df: pd.DataFrame, packet_df: pd.DataFrame, *, verbos
             if subset.empty:
                 continue
             label = pkt_type if pkt_type != "br_edr" else "br_edr"
-            ax.scatter(
-                subset[GpsColumns.longitude],
-                subset[GpsColumns.latitude],
-                color=color_map.get(pkt_type, "tab:blue"),
-                s=24,
-                label=label,
-            )
+            if use_basemap and basemap_provider == "osm":
+                xs, ys = zip(
+                    *(
+                        _lonlat_to_web_mercator(float(lon), float(lat))
+                        for lon, lat in zip(
+                            subset[GpsColumns.longitude].tolist(),
+                            subset[GpsColumns.latitude].tolist(),
+                        )
+                    )
+                )
+                ax.scatter(
+                    xs,
+                    ys,
+                    color=color_map.get(pkt_type, "tab:blue"),
+                    s=24,
+                    label=label,
+                )
+            else:
+                ax.scatter(
+                    subset[GpsColumns.longitude],
+                    subset[GpsColumns.latitude],
+                    color=color_map.get(pkt_type, "tab:blue"),
+                    s=24,
+                    label=label,
+                )
 
     ax.set_title("Bluetooth Packet Locations")
-    ax.set_xlabel("Longitude")
-    ax.set_ylabel("Latitude")
+    if use_basemap and basemap_provider == "osm":
+        ax.set_xlabel("Web Mercator X (m)")
+        ax.set_ylabel("Web Mercator Y (m)")
+    else:
+        ax.set_xlabel("Longitude")
+        ax.set_ylabel("Latitude")
     ax.legend()
     ax.grid(True, linestyle="--", alpha=0.4)
     plt.tight_layout()
@@ -433,6 +706,29 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--basemap",
+        default="none",
+        choices=["none", "osm"],
+        help=(
+            "Optional basemap background. 'osm' uses OpenStreetMap tiles and caches downloads "
+            "for faster repeat plots. Default: none."
+        ),
+    )
+    parser.add_argument(
+        "--basemap-zoom",
+        type=int,
+        help=(
+            "Basemap zoom level (0-19). If omitted, a zoom is chosen automatically based on the plot area."
+        ),
+    )
+    parser.add_argument(
+        "--basemap-cache-dir",
+        default=str(Path(".cache") / "basemaps"),
+        help=(
+            "Directory to cache basemap tiles and stitched images (default: .cache/basemaps)."
+        ),
+    )
+    parser.add_argument(
         "-v",
         "--verbose",
         action="store_true",
@@ -457,6 +753,11 @@ def main() -> None:
         detailed_le_adv_types=bool(args.color_by_packet_type),
         verbose=args.verbose,
     )
+
+    packet_df.attrs["use_basemap"] = args.basemap != "none"
+    packet_df.attrs["basemap_provider"] = args.basemap
+    packet_df.attrs["basemap_zoom"] = args.basemap_zoom
+    packet_df.attrs["basemap_cache_dir"] = args.basemap_cache_dir
     pkt_time_min_loaded = packet_df["timestamp"].min() if not packet_df.empty else None
     pkt_time_max_loaded = packet_df["timestamp"].max() if not packet_df.empty else None
 
