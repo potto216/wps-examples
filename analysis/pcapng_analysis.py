@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from scapy.all import Packet, rdpcap
+from scapy.fields import Field as ScapyField
 
 # Scapy 2.7 Bluetooth LE layers.
 from scapy.layers.bluetooth4LE import (  # type: ignore
@@ -40,6 +41,31 @@ ADV_TYPE_LAYERS: Tuple[Tuple[type, str], ...] = (
 
 ADDRESS_FIELDS = ("AdvA", "ScanA", "InitA", "AAS")
 ADV_DATA_FIELDS = ("AdvData", "ScanRspData", "Data")
+
+
+def _format_bdaddr(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+
+    if isinstance(value, bytes):
+        if len(value) == 6:
+            return ":".join(f"{b:02x}" for b in value)
+        return value.hex()
+
+    if isinstance(value, str):
+        # Guard against accidentally stringifying Scapy Field descriptors.
+        if value.startswith("<") and "Field" in value and value.endswith(">"):
+            return None
+        return value
+
+    try:
+        as_bytes = bytes(value)
+    except Exception:
+        return str(value)
+
+    if len(as_bytes) == 6:
+        return ":".join(f"{b:02x}" for b in as_bytes)
+    return as_bytes.hex()
 
 
 @dataclass
@@ -138,7 +164,13 @@ class PcapngAnalyzer:
                 break
 
         addresses = self._extract_addresses(packet)
-        primary_address = next(iter(addresses.values()), None)
+        primary_address = (
+            addresses.get("AdvA")
+            or addresses.get("ScanA")
+            or addresses.get("InitA")
+            or addresses.get("AAS")
+            or next(iter(addresses.values()), None)
+        )
         adv_data = self._extract_adv_data(packet)
         adv_data_hex = adv_data.hex() if adv_data else None
 
@@ -154,12 +186,22 @@ class PcapngAnalyzer:
 
     def _extract_addresses(self, packet: Packet) -> Dict[str, str]:
         addresses: Dict[str, str] = {}
-        for layer in packet.layers():
+        for layer_cls in packet.layers():
+            layer = packet.getlayer(layer_cls)
+            if layer is None:
+                continue
             for field in ADDRESS_FIELDS:
-                if hasattr(layer, field):
-                    value = getattr(layer, field)
-                    if value:
-                        addresses[field] = str(value)
+                if field in getattr(layer, "fields", {}):
+                    value = layer.fields.get(field)
+                else:
+                    value = getattr(layer, field, None)
+
+                if value is None or isinstance(value, ScapyField):
+                    continue
+
+                text = _format_bdaddr(value)
+                if text:
+                    addresses[field] = text
         return addresses
 
     def _extract_adv_data(self, packet: Packet) -> Optional[bytes]:

@@ -109,7 +109,7 @@ def _basemap_cache_key(
     return hashlib.sha1(payload).hexdigest()
 
 
-def _download_osm_tile(*, z: int, x: int, y: int, tile_path: Path) -> "Image.Image":
+def _download_osm_tile(*, z: int, x: int, y: int, tile_path: Path):
     # Pillow is typically present via matplotlib, but keep it optional.
     try:
         from PIL import Image  # type: ignore
@@ -152,7 +152,7 @@ def _load_or_build_osm_basemap(
     bounds_mercator: tuple[float, float, float, float],
     zoom: Optional[int],
     cache_dir: Path,
-) -> tuple["Image.Image", tuple[float, float, float, float], int]:
+):
     try:
         from PIL import Image  # type: ignore
     except ImportError as exc:  # pragma: no cover
