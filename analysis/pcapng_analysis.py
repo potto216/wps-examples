@@ -11,33 +11,61 @@ from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from scapy.all import Packet, rdpcap
-from scapy.layers.bluetooth import (
+from scapy.fields import Field as ScapyField
+
+# Scapy 2.7 Bluetooth LE layers.
+from scapy.layers.bluetooth4LE import (  # type: ignore
     BTLE,
-    BTLEAdvertisingHdr,
-    BTLEAdvDirectInd,
-    BTLEAdvExtInd,
-    BTLEAdvInd,
-    BTLEAdvNonconnInd,
-    BTLEAdvScanInd,
-    BTLEConnectReq,
-    BTLEScanReq,
-    BTLEScanRsp,
+    BTLE_ADV,
+    BTLE_ADV_DIRECT_IND,
+    BTLE_ADV_IND,
+    BTLE_ADV_NONCONN_IND,
+    BTLE_ADV_SCAN_IND,
+    BTLE_CONNECT_REQ,
+    BTLE_PPI,
+    BTLE_RF,
+    BTLE_SCAN_REQ,
+    BTLE_SCAN_RSP,
 )
 
 ADV_CHANNELS = {37, 38, 39}
 ADV_TYPE_LAYERS: Tuple[Tuple[type, str], ...] = (
-    (BTLEAdvInd, "adv_ind"),
-    (BTLEAdvDirectInd, "adv_direct_ind"),
-    (BTLEAdvNonconnInd, "adv_nonconn_ind"),
-    (BTLEAdvScanInd, "adv_scan_ind"),
-    (BTLEScanReq, "scan_req"),
-    (BTLEScanRsp, "scan_rsp"),
-    (BTLEConnectReq, "connect_req"),
-    (BTLEAdvExtInd, "adv_ext_ind"),
+    (BTLE_ADV_IND, "adv_ind"),
+    (BTLE_ADV_DIRECT_IND, "adv_direct_ind"),
+    (BTLE_ADV_NONCONN_IND, "adv_nonconn_ind"),
+    (BTLE_ADV_SCAN_IND, "adv_scan_ind"),
+    (BTLE_SCAN_REQ, "scan_req"),
+    (BTLE_SCAN_RSP, "scan_rsp"),
+    (BTLE_CONNECT_REQ, "connect_req"),
 )
 
 ADDRESS_FIELDS = ("AdvA", "ScanA", "InitA", "AAS")
 ADV_DATA_FIELDS = ("AdvData", "ScanRspData", "Data")
+
+
+def _format_bdaddr(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+
+    if isinstance(value, bytes):
+        if len(value) == 6:
+            return ":".join(f"{b:02x}" for b in value)
+        return value.hex()
+
+    if isinstance(value, str):
+        # Guard against accidentally stringifying Scapy Field descriptors.
+        if value.startswith("<") and "Field" in value and value.endswith(">"):
+            return None
+        return value
+
+    try:
+        as_bytes = bytes(value)
+    except Exception:
+        return str(value)
+
+    if len(as_bytes) == 6:
+        return ":".join(f"{b:02x}" for b in as_bytes)
+    return as_bytes.hex()
 
 
 @dataclass
@@ -98,6 +126,11 @@ class PcapngAnalyzer:
         return output_path
 
     def _extract_records(self, packets: Iterable[Packet]) -> List[PacketRecord]:
+        if BTLE is None:
+            raise RuntimeError(
+                "Scapy BTLE layers are unavailable. Install/upgrade Scapy and ensure "
+                "Bluetooth LE layers are present (e.g. scapy.layers.bluetooth4LE)."
+            )
         records: List[PacketRecord] = []
         for packet in packets:
             if not packet.haslayer(BTLE):
@@ -112,10 +145,18 @@ class PcapngAnalyzer:
         channel = None
         rssi = None
         packet_type = "unknown"
-        if packet.haslayer(BTLEAdvertisingHdr):
-            advertising_hdr = packet[BTLEAdvertisingHdr]
-            channel = int(getattr(advertising_hdr, "channel", None) or 0) or None
-            rssi_value = getattr(advertising_hdr, "rssi", None)
+        # Channel/RSSI metadata is typically stored in capture metadata layers.
+        if packet.haslayer(BTLE_PPI):
+            ppi = packet[BTLE_PPI]
+            chan = getattr(ppi, "btle_channel", None)
+            channel = int(chan) if chan is not None else None
+            rssi_value = getattr(ppi, "rssi_avg", None)
+            rssi = int(rssi_value) if rssi_value is not None else None
+        elif packet.haslayer(BTLE_RF):
+            rf = packet[BTLE_RF]
+            chan = getattr(rf, "rf_channel", None)
+            channel = int(chan) if chan is not None else None
+            rssi_value = getattr(rf, "signal", None)
             rssi = int(rssi_value) if rssi_value is not None else None
         for layer, name in ADV_TYPE_LAYERS:
             if packet.haslayer(layer):
@@ -123,7 +164,13 @@ class PcapngAnalyzer:
                 break
 
         addresses = self._extract_addresses(packet)
-        primary_address = next(iter(addresses.values()), None)
+        primary_address = (
+            addresses.get("AdvA")
+            or addresses.get("ScanA")
+            or addresses.get("InitA")
+            or addresses.get("AAS")
+            or next(iter(addresses.values()), None)
+        )
         adv_data = self._extract_adv_data(packet)
         adv_data_hex = adv_data.hex() if adv_data else None
 
@@ -139,12 +186,22 @@ class PcapngAnalyzer:
 
     def _extract_addresses(self, packet: Packet) -> Dict[str, str]:
         addresses: Dict[str, str] = {}
-        for layer in packet.layers():
+        for layer_cls in packet.layers():
+            layer = packet.getlayer(layer_cls)
+            if layer is None:
+                continue
             for field in ADDRESS_FIELDS:
-                if hasattr(layer, field):
-                    value = getattr(layer, field)
-                    if value:
-                        addresses[field] = str(value)
+                if field in getattr(layer, "fields", {}):
+                    value = layer.fields.get(field)
+                else:
+                    value = getattr(layer, field, None)
+
+                if value is None or isinstance(value, ScapyField):
+                    continue
+
+                text = _format_bdaddr(value)
+                if text:
+                    addresses[field] = text
         return addresses
 
     def _extract_adv_data(self, packet: Packet) -> Optional[bytes]:

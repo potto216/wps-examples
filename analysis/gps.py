@@ -120,14 +120,51 @@ def interpolate_gps_events(
     if event_time_col not in events_df.columns:
         raise ValueError(f"events_df missing required column: {event_time_col}")
 
+    gps_subset = gps_df[[gps_time_col, lat_col, lon_col]]
     gps_sorted = (
-        gps_df[[gps_time_col, lat_col, lon_col]]
-        .dropna()
+        gps_subset.dropna()
         .sort_values(gps_time_col)
         .drop_duplicates(subset=gps_time_col)
     )
     if gps_sorted.empty:
-        raise ValueError("gps_df must contain at least one valid GPS fix with timestamps")
+        def _fmt_ts(ts: object) -> str:
+            try:
+                ts_pd = pd.to_datetime(ts, utc=True, errors="coerce")
+            except Exception:
+                return "(unparseable)"
+            if ts_pd is pd.NaT or pd.isna(ts_pd):
+                return "(none)"
+            text = ts_pd.isoformat().replace("+00:00", "Z")
+            return f"{text} (UTC)"
+
+        def _fmt_range(ts_min: object, ts_max: object) -> str:
+            return f"{_fmt_ts(ts_min)} .. {_fmt_ts(ts_max)}"
+
+        gps_total = len(gps_df)
+        gps_non_null = int(gps_subset.dropna().shape[0])
+        gps_time_min = None
+        gps_time_max = None
+        if gps_time_col in gps_df.columns:
+            gps_times_raw = pd.to_datetime(gps_df[gps_time_col], utc=True, errors="coerce")
+            if gps_times_raw.notna().any():
+                gps_time_min = gps_times_raw.min()
+                gps_time_max = gps_times_raw.max()
+
+        event_total = len(events_df)
+        event_time_min = None
+        event_time_max = None
+        if event_time_col in events_df.columns:
+            event_times_raw = pd.to_datetime(events_df[event_time_col], utc=True, errors="coerce")
+            if event_times_raw.notna().any():
+                event_time_min = event_times_raw.min()
+                event_time_max = event_times_raw.max()
+
+        raise ValueError(
+            "gps_df must contain at least one valid GPS fix with timestamps. "
+            f"gps_df rows={gps_total}, valid_rows(after dropna on {gps_time_col},{lat_col},{lon_col})={gps_non_null}. "
+            f"gps_time_range={_fmt_range(gps_time_min, gps_time_max)}. "
+            f"events_df rows={event_total}, event_time_range={_fmt_range(event_time_min, event_time_max)}."
+        )
 
     gps_times = pd.to_datetime(gps_sorted[gps_time_col], utc=True)
     gps_ns = gps_times.view("int64").to_numpy()
