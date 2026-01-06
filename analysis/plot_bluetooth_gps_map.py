@@ -6,13 +6,15 @@ import argparse
 import hashlib
 import json
 import math
-import os
 from pathlib import Path
+from dataclasses import dataclass
 from typing import Optional
 from urllib.request import Request, urlopen
 
 import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
+from matplotlib.collections import LineCollection
 from scapy.all import Packet, rdpcap
 from scapy.layers.bluetooth import HCI_ACL_Hdr, HCI_Command_Hdr, HCI_Event_Hdr, HCI_Hdr, L2CAP_Hdr
 
@@ -64,6 +66,23 @@ from gps import GpsColumns, interpolate_gps_events, load_gpx, load_kml
 
 WEB_MERCATOR_RADIUS_M = 6378137.0
 OSM_TILE_URL_TEMPLATE = "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
+DEFAULT_CONFIG_PATH = Path("plot_bluetooth_gps_map.json")
+
+
+@dataclass(frozen=True)
+class TrackStyle:
+    color: str
+    base_linewidth: float
+    width_scale: float
+
+
+@dataclass(frozen=True)
+class DensityLineConfig:
+    enabled: bool
+    window: pd.Timedelta
+    max_linewidth: float
+    min_linewidth: float
+    packet_types: Optional[list[str]]
 
 
 def _lonlat_to_web_mercator(lon: float, lat: float) -> tuple[float, float]:
@@ -353,6 +372,71 @@ def _apply_time_range_filter(
     return filtered
 
 
+def _load_plot_config(path: Path, *, allow_missing: bool) -> dict[str, object]:
+    if not path.exists():
+        if allow_missing:
+            return {}
+        raise FileNotFoundError(f"Config file not found: {path}")
+
+    try:
+        config_data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid JSON in config file: {path}") from exc
+
+    if not isinstance(config_data, dict):
+        raise ValueError(f"Config file must contain a JSON object: {path}")
+    return config_data
+
+
+def _parse_track_style(config: dict[str, object]) -> TrackStyle:
+    color = str(config.get("line_color", "gray"))
+    base_linewidth = float(config.get("line_base_width", 1.5))
+    width_scale = float(config.get("line_width_scale", 1.0))
+    return TrackStyle(color=color, base_linewidth=base_linewidth, width_scale=width_scale)
+
+
+def _parse_density_config(config: dict[str, object], *, enabled: bool) -> DensityLineConfig:
+    window_seconds = float(config.get("density_window_seconds", 30.0))
+    if window_seconds <= 0:
+        raise ValueError("density_window_seconds must be > 0")
+    max_linewidth = float(config.get("density_max_linewidth", 6.0))
+    min_linewidth = float(config.get("density_min_linewidth", 0.5))
+    if max_linewidth <= 0 or min_linewidth <= 0:
+        raise ValueError("density_max_linewidth and density_min_linewidth must be > 0")
+    if min_linewidth > max_linewidth:
+        raise ValueError("density_min_linewidth must be <= density_max_linewidth")
+    packet_types = config.get("density_packet_types")
+    if packet_types is not None:
+        if not isinstance(packet_types, list):
+            raise ValueError("density_packet_types must be a list of packet type strings")
+        packet_types = [str(item) for item in packet_types]
+    return DensityLineConfig(
+        enabled=enabled,
+        window=pd.Timedelta(seconds=window_seconds),
+        max_linewidth=max_linewidth,
+        min_linewidth=min_linewidth,
+        packet_types=packet_types,
+    )
+
+
+def _count_packets_in_window(
+    gps_times: pd.Series,
+    packet_times: pd.Series,
+    window: pd.Timedelta,
+) -> np.ndarray:
+    if packet_times.empty:
+        return np.zeros(len(gps_times), dtype=float)
+
+    gps_ns = gps_times.to_numpy(dtype="datetime64[ns]").astype("int64")
+    packet_ns = packet_times.sort_values().to_numpy(dtype="datetime64[ns]").astype("int64")
+    half_window = int(window.value / 2)
+    left = gps_ns - half_window
+    right = gps_ns + half_window
+    left_idx = np.searchsorted(packet_ns, left, side="left")
+    right_idx = np.searchsorted(packet_ns, right, side="right")
+    return (right_idx - left_idx).astype(float)
+
+
 def _load_gps_data(path: str, gps_type: str, *, verbose: bool = False) -> pd.DataFrame:
     if gps_type == "gpx":
         gps_df = load_gpx(path)
@@ -477,7 +561,14 @@ def _type_color_map(types: list[str]) -> dict[str, object]:
     return {t: cmap(i % cmap.N) for i, t in enumerate(sorted(types))}
 
 
-def plot_packets_on_map(gps_df: pd.DataFrame, packet_df: pd.DataFrame, *, verbose: bool = False) -> None:
+def plot_packets_on_map(
+    gps_df: pd.DataFrame,
+    packet_df: pd.DataFrame,
+    *,
+    track_style: TrackStyle,
+    density_config: DensityLineConfig,
+    verbose: bool = False,
+) -> None:
     if packet_df.empty:
         raise ValueError("No Bluetooth packets were found in the capture.")
 
@@ -542,21 +633,75 @@ def plot_packets_on_map(gps_df: pd.DataFrame, packet_df: pd.DataFrame, *, verbos
             x, y = _lonlat_to_web_mercator(float(lon), float(lat))
             gps_x.append(x)
             gps_y.append(y)
+        track_x = np.array(gps_x, dtype=float)
+        track_y = np.array(gps_y, dtype=float)
+    else:
+        track_x = gps_df[GpsColumns.longitude].to_numpy(dtype=float)
+        track_y = gps_df[GpsColumns.latitude].to_numpy(dtype=float)
 
-        ax.plot(
-            gps_x,
-            gps_y,
-            color="gray",
-            linewidth=1.5,
-            label="GPS Track",
+    track_label = "GPS Track"
+    if density_config.enabled:
+        density_packet_df = packet_df
+        if density_config.packet_types:
+            density_packet_df = density_packet_df[
+                density_packet_df["packet_type"].isin(density_config.packet_types)
+            ]
+        gps_times = gps_df[GpsColumns.timestamp]
+        packet_times = density_packet_df["timestamp"] if not density_packet_df.empty else gps_times.iloc[:0]
+        counts = _count_packets_in_window(gps_times, packet_times, density_config.window)
+        if len(counts) > 1:
+            segment_counts = (counts[:-1] + counts[1:]) / 2.0
+        else:
+            segment_counts = counts
+        widths = np.clip(
+            segment_counts * track_style.width_scale,
+            density_config.min_linewidth,
+            density_config.max_linewidth,
         )
+        if len(track_x) >= 2:
+            points = np.column_stack([track_x, track_y])
+            segments = np.stack([points[:-1], points[1:]], axis=1)
+            ax.add_collection(
+                LineCollection(
+                    segments,
+                    colors=track_style.color,
+                    linewidths=widths,
+                )
+            )
+            track_label = "GPS Track (density)"
+            ax.plot(
+                [],
+                [],
+                color=track_style.color,
+                linewidth=density_config.max_linewidth,
+                label=track_label,
+            )
+        else:
+            ax.plot(
+                track_x,
+                track_y,
+                color=track_style.color,
+                linewidth=track_style.base_linewidth * track_style.width_scale,
+                label=track_label,
+            )
+        if verbose:
+            packet_type_desc = (
+                ", ".join(density_config.packet_types)
+                if density_config.packet_types
+                else "all types"
+            )
+            max_count = int(np.max(segment_counts)) if len(segment_counts) else 0
+            print(
+                "Density line enabled: "
+                f"window={density_config.window}, types={packet_type_desc}, max_count={max_count}"
+            )
     else:
         ax.plot(
-            gps_df[GpsColumns.longitude],
-            gps_df[GpsColumns.latitude],
-            color="gray",
-            linewidth=1.5,
-            label="GPS Track",
+            track_x,
+            track_y,
+            color=track_style.color,
+            linewidth=track_style.base_linewidth * track_style.width_scale,
+            label=track_label,
         )
 
     types_present = sorted(events_with_locations["packet_type"].dropna().unique().tolist())
@@ -659,6 +804,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--pcapng", required=True, help="Path to the Bluetooth pcapng file.")
     parser.add_argument(
+        "--config",
+        default=str(DEFAULT_CONFIG_PATH),
+        help=(
+            "Optional JSON config file for plot styling. "
+            f"Default: {DEFAULT_CONFIG_PATH} if present."
+        ),
+    )
+    parser.add_argument(
         "--pcap-time-offset",
         help=(
             "Time offset to add to packet timestamps before filtering/interpolation. "
@@ -706,6 +859,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--density-line",
+        action="store_true",
+        help=(
+            "Scale the GPS track line width by Bluetooth packet density. "
+            "Uses density_* settings from the JSON config."
+        ),
+    )
+    parser.add_argument(
         "--basemap",
         default="none",
         choices=["none", "osm"],
@@ -740,6 +901,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
 def main() -> None:
     parser = build_arg_parser()
     args = parser.parse_args()
+
+    config_path = Path(args.config)
+    config = _load_plot_config(
+        config_path,
+        allow_missing=config_path == DEFAULT_CONFIG_PATH,
+    )
+    track_style = _parse_track_style(config)
+    density_config = _parse_density_config(config, enabled=bool(args.density_line))
+    if args.verbose:
+        if config_path.exists():
+            print(f"Plot config loaded: {config_path}")
+        elif config_path == DEFAULT_CONFIG_PATH:
+            print(f"Plot config not found (using defaults): {config_path}")
 
     pcap_time_offset = _parse_time_offset(args.pcap_time_offset)
 
@@ -812,7 +986,13 @@ def main() -> None:
                 "This typically means the GPS and PCAP timestamps are in different timezones or timebases."
             )
 
-    plot_packets_on_map(gps_df, packet_df, verbose=args.verbose)
+    plot_packets_on_map(
+        gps_df,
+        packet_df,
+        track_style=track_style,
+        density_config=density_config,
+        verbose=args.verbose,
+    )
 
 
 if __name__ == "__main__":
