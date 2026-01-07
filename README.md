@@ -1,6 +1,6 @@
 # Overview
 
-This repository is a collection of examples for automation tasks using [Teledyne LeCroy's Frontline Wireless Protocol Suite](https://www.teledynelecroy.com/support/softwaredownload/psgdocuments.aspx?standardid=2&mseries=671). This powerful suite is used for capturing wireless technology data as well as logic and wired serial protocols.
+This repository is a collection of examples for automation tasks using [Teledyne LeCroy's Frontline Wireless Protocol Suite](https://www.teledynelecroy.com/support/softwaredownload/psgdocuments.aspx?standardid=2&mseries=671). This suite is used for capturing wireless technology data as well as logic and wired serial protocols.
 
 # Use Cases
 
@@ -50,10 +50,19 @@ If you need to use the latest version of wpshelper from its remote repository ra
 git submodule sync
 git submodule update --recursive --remote
 ```
-## Contributing
+## Notes
+To determine the `scapy` version and see if the needed bluetooth classes are used run:
+
+```
+python -c "import scapy; import scapy.layers.bluetooth4LE as b; print('scapy', scapy.__version__); names=[n for n in dir(b) if n.startswith('BTLE')]; print('BTLE symbols sample:', sorted(names)[:80])"
+
+python.exe -c "import scapy.layers.bluetooth4LE as b; print('BTLE_ADV fields', [f.name for f in getattr(b.BTLE_ADV,'fields_desc',[])][:20]); print('BTLE_RF fields', [f.name for f in getattr(b.BTLE_RF,'fields_desc',[])][:30]); print('BTLE_PPI fields', [f.name for f in getattr(b.BTLE_PPI,'fields_desc',[])][:30])"
+```
+
+# Contributing
 
 Contributions are welcome! If you have ideas or improvements, feel free to open an issue or submit a pull request.
 
-## License
+# License
 
 This project is open-source. See the [LICENSE](LICENSE.md) file for more details.

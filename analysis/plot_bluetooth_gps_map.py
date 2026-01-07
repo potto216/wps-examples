@@ -653,8 +653,24 @@ def plot_packets_on_map(
             segment_counts = (counts[:-1] + counts[1:]) / 2.0
         else:
             segment_counts = counts
+        # Map counts -> linewidth by normalizing into [min_linewidth, max_linewidth].
+        # The previous implementation used raw counts directly, which often saturates at the
+        # min/max clip bounds and makes the line look uniform.
+        max_count = float(np.max(segment_counts)) if len(segment_counts) else 0.0
+        if max_count <= 0.0:
+            widths = np.full(
+                shape=(len(segment_counts),),
+                fill_value=density_config.min_linewidth,
+                dtype=float,
+            )
+        else:
+            widths = density_config.min_linewidth + (
+                (segment_counts / max_count)
+                * (density_config.max_linewidth - density_config.min_linewidth)
+            )
+
         widths = np.clip(
-            segment_counts * track_style.width_scale,
+            widths * track_style.width_scale,
             density_config.min_linewidth,
             density_config.max_linewidth,
         )
@@ -691,9 +707,14 @@ def plot_packets_on_map(
                 else "all types"
             )
             max_count = int(np.max(segment_counts)) if len(segment_counts) else 0
+            min_count = int(np.min(segment_counts)) if len(segment_counts) else 0
+            min_width = float(np.min(widths)) if len(widths) else float("nan")
+            max_width = float(np.max(widths)) if len(widths) else float("nan")
             print(
                 "Density line enabled: "
-                f"window={density_config.window}, types={packet_type_desc}, max_count={max_count}"
+                f"window={density_config.window}, types={packet_type_desc}, "
+                f"count_range=[{min_count}, {max_count}], "
+                f"width_range=[{min_width:.2f}, {max_width:.2f}]"
             )
     else:
         ax.plot(

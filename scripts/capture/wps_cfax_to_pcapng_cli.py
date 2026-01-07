@@ -149,11 +149,12 @@ def main() -> None:
     parser.add_argument("--recursive", action="store_true", help="Recursively search for .cfax files.")
     parser.add_argument(
         "--skip-existing",
-        action="store_true",
+        action="store_true",        
         help="Skip conversion if the .pcapng file already exists.",
     )
     parser.add_argument(
         "--technology-filter",
+        default="LE",
         help="Technology filter string to pass to the pcapng export, if supported by WPS.",
     )
     parser.add_argument("--log-level", default="info", help="Log level (debug, info, warning, error, critical).")
@@ -218,8 +219,11 @@ def main() -> None:
             tcp_port=args.tcp_port,
             max_to_read=MAX_TO_READ,
             wps_executable_path=wps_executable_path,
+            personality_key="VIEW",
             sleep_time=args.sleep_time,
             max_wait_time=args.max_wait_time,
+            recv_retry_attempts=10,
+            recv_retry_sleep=5,
         )
 
         for cfax_path in cfax_files:
