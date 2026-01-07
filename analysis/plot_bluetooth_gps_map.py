@@ -12,6 +12,7 @@ from typing import Optional
 from urllib.request import Request, urlopen
 
 import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
 import numpy as np
 import pandas as pd
 from matplotlib.collections import LineCollection
@@ -568,6 +569,7 @@ def plot_packets_on_map(
     track_style: TrackStyle,
     density_config: DensityLineConfig,
     verbose: bool = False,
+    show: bool = True,
 ) -> None:
     if packet_df.empty:
         raise ValueError("No Bluetooth packets were found in the capture.")
@@ -814,7 +816,75 @@ def plot_packets_on_map(
     ax.legend()
     ax.grid(True, linestyle="--", alpha=0.4)
     plt.tight_layout()
-    plt.show(block=True)
+    if show:
+        plt.show(block=True)
+
+
+def plot_bluetooth_packet_counts_over_time(
+    packet_df: pd.DataFrame,
+    *,
+    interval_seconds: float = 5.0,
+    packet_types: Optional[list[str]] = None,
+    verbose: bool = False,
+    show: bool = True,
+) -> None:
+    """Plot bluetooth packet density over time as counts per fixed interval.
+
+    - X axis: time (readable datetime)
+    - Y axis: number of packets in each interval
+    - Title: always includes interval length
+    - Filtering: optional packet type allow-list
+    """
+
+    if interval_seconds <= 0:
+        raise ValueError("interval_seconds must be > 0")
+
+    if packet_df.empty:
+        raise ValueError("No Bluetooth packets were found in the capture.")
+
+    filtered = packet_df
+    if packet_types:
+        filtered = filtered[filtered["packet_type"].isin(packet_types)]
+
+    if filtered.empty:
+        raise ValueError("No Bluetooth packets matched the requested packet type filter(s).")
+
+    ts = pd.to_datetime(filtered["timestamp"], utc=True, errors="coerce").dropna()
+    if ts.empty:
+        raise ValueError("Packet timestamps could not be parsed.")
+
+    # Bin timestamps into fixed-width intervals.
+    interval = pd.Timedelta(seconds=float(interval_seconds))
+    bins = ts.dt.floor(interval)
+    counts = bins.value_counts().sort_index()
+
+    fig, ax = plt.subplots(figsize=(10, 4))
+    ax.plot(counts.index.to_pydatetime(), counts.to_numpy(dtype=int), linestyle="-", marker="o", markersize=3)
+
+    ax.set_xlabel("Time (UTC)")
+    ax.set_ylabel("Packets / interval")
+
+    interval_label = f"{int(interval_seconds)}s" if float(interval_seconds).is_integer() else f"{interval_seconds:g}s"
+    filter_desc = "all types" if not packet_types else ", ".join(packet_types)
+    ax.set_title(f"Bluetooth packets per {interval_label} interval ({filter_desc})")
+
+    locator = mdates.AutoDateLocator(minticks=3, maxticks=10)
+    formatter = mdates.ConciseDateFormatter(locator)
+    ax.xaxis.set_major_locator(locator)
+    ax.xaxis.set_major_formatter(formatter)
+
+    ax.grid(True, linestyle="--", alpha=0.4)
+    fig.autofmt_xdate()
+    plt.tight_layout()
+
+    if verbose:
+        print(
+            "Packet count plot: "
+            f"interval={interval}, points={len(counts)}, total_packets={len(filtered)}"
+        )
+
+    if show:
+        plt.show(block=True)
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -1007,13 +1077,24 @@ def main() -> None:
                 "This typically means the GPS and PCAP timestamps are in different timezones or timebases."
             )
 
+    # Build both figures first so they open as separate windows.
+    # Always run the packet-count plot with default args (5s interval, all types).
+    plot_bluetooth_packet_counts_over_time(
+        packet_df,
+        interval_seconds=5.0,
+        packet_types=None,
+        verbose=args.verbose,
+        show=False,
+    )
     plot_packets_on_map(
         gps_df,
         packet_df,
         track_style=track_style,
         density_config=density_config,
         verbose=args.verbose,
+        show=False,
     )
+    plt.show(block=True)
 
 
 if __name__ == "__main__":
