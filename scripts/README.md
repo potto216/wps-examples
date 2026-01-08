@@ -114,6 +114,16 @@ python scripts/matter/wps_matter_key_update_from_log.py `
   --output_file_name matter_parsed.log
 ```
 
+** Example (Convert cfa to cfax file format) **
+Windows PowerShell:
+
+```powershell
+python .\scripts\capture\wps_cfa_to_cfax_cli.py `
+   --recursive `
+   --skip-existing `
+   C:\Users\potto\projects\tmp
+```
+
 ## Notes
 
 * Both scripts assume the WPS automation server is reachable at `192.168.58.1:22901` by default.
