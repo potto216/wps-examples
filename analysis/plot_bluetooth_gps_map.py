@@ -13,6 +13,7 @@ from urllib.request import Request, urlopen
 
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
+import matplotlib.colors as mcolors
 import numpy as np
 import pandas as pd
 from matplotlib.collections import LineCollection
@@ -655,43 +656,38 @@ def plot_packets_on_map(
             segment_counts = (counts[:-1] + counts[1:]) / 2.0
         else:
             segment_counts = counts
-        # Map counts -> linewidth by normalizing into [min_linewidth, max_linewidth].
-        # The previous implementation used raw counts directly, which often saturates at the
-        # min/max clip bounds and makes the line look uniform.
-        max_count = float(np.max(segment_counts)) if len(segment_counts) else 0.0
-        if max_count <= 0.0:
-            widths = np.full(
-                shape=(len(segment_counts),),
-                fill_value=density_config.min_linewidth,
-                dtype=float,
-            )
+        # Color the track by packet density (keep linewidth constant).
+        # This makes density changes visible even when raw counts are high/low across the capture.
+        cmap = plt.get_cmap("viridis")
+        if len(segment_counts):
+            vmin = float(np.min(segment_counts))
+            vmax = float(np.max(segment_counts))
         else:
-            widths = density_config.min_linewidth + (
-                (segment_counts / max_count)
-                * (density_config.max_linewidth - density_config.min_linewidth)
-            )
+            vmin = 0.0
+            vmax = 0.0
+        norm = mcolors.Normalize(vmin=vmin, vmax=vmax) if vmax > vmin else None
+        if norm is None:
+            segment_colors = np.tile(np.array(cmap(0.0)), (len(segment_counts), 1))
+        else:
+            segment_colors = cmap(norm(segment_counts))
 
-        widths = np.clip(
-            widths * track_style.width_scale,
-            density_config.min_linewidth,
-            density_config.max_linewidth,
-        )
+        line_width = track_style.base_linewidth * track_style.width_scale
         if len(track_x) >= 2:
             points = np.column_stack([track_x, track_y])
             segments = np.stack([points[:-1], points[1:]], axis=1)
             ax.add_collection(
                 LineCollection(
                     segments,
-                    colors=track_style.color,
-                    linewidths=widths,
+                    colors=segment_colors,
+                    linewidths=line_width,
                 )
             )
-            track_label = "GPS Track (density)"
+            track_label = "GPS Track (density color)"
             ax.plot(
                 [],
                 [],
-                color=track_style.color,
-                linewidth=density_config.max_linewidth,
+                color=cmap(1.0),
+                linewidth=line_width,
                 label=track_label,
             )
         else:
@@ -699,7 +695,7 @@ def plot_packets_on_map(
                 track_x,
                 track_y,
                 color=track_style.color,
-                linewidth=track_style.base_linewidth * track_style.width_scale,
+                linewidth=line_width,
                 label=track_label,
             )
         if verbose:
@@ -710,13 +706,11 @@ def plot_packets_on_map(
             )
             max_count = int(np.max(segment_counts)) if len(segment_counts) else 0
             min_count = int(np.min(segment_counts)) if len(segment_counts) else 0
-            min_width = float(np.min(widths)) if len(widths) else float("nan")
-            max_width = float(np.max(widths)) if len(widths) else float("nan")
             print(
                 "Density line enabled: "
                 f"window={density_config.window}, types={packet_type_desc}, "
                 f"count_range=[{min_count}, {max_count}], "
-                f"width_range=[{min_width:.2f}, {max_width:.2f}]"
+                f"mode=color (cmap=viridis, linewidth={line_width:g})"
             )
     else:
         ax.plot(
@@ -1005,6 +999,29 @@ def main() -> None:
             print(f"Plot config loaded: {config_path}")
         elif config_path == DEFAULT_CONFIG_PATH:
             print(f"Plot config not found (using defaults): {config_path}")
+
+        # Raw config values (with defaults applied by the parse helpers).
+        density_packet_types = config.get("density_packet_types")
+        if isinstance(density_packet_types, list):
+            density_packet_types_str = ", ".join(str(x) for x in density_packet_types)
+        elif density_packet_types is None:
+            density_packet_types_str = "(all types)"
+        else:
+            density_packet_types_str = str(density_packet_types)
+
+        print(
+            "Plot config parameters: "
+            f"line_color={track_style.color}, "
+            f"line_base_width={track_style.base_linewidth}, "
+            f"line_width_scale={track_style.width_scale}"
+        )
+        print(
+            "Density config parameters: "
+            f"density_window_seconds={density_config.window.total_seconds():g}, "
+            f"density_min_linewidth={density_config.min_linewidth:g}, "
+            f"density_max_linewidth={density_config.max_linewidth:g}, "
+            f"density_packet_types={density_packet_types_str}"
+        )
 
     pcap_time_offset = _parse_time_offset(args.pcap_time_offset)
 
