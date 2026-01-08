@@ -8,8 +8,14 @@ from pathlib import Path
 def load_pcapng_module():
     dummy_scapy = types.ModuleType("scapy")
     dummy_scapy_all = types.ModuleType("scapy.all")
+    dummy_scapy_fields = types.ModuleType("scapy.fields")
     dummy_layers = types.ModuleType("scapy.layers")
     dummy_layers_bluetooth = types.ModuleType("scapy.layers.bluetooth")
+    dummy_layers_bluetooth4le = types.ModuleType("scapy.layers.bluetooth4LE")
+
+    # Mark parent modules as packages so submodule imports work.
+    dummy_scapy.__path__ = []
+    dummy_layers.__path__ = []
 
     class DummyPacket:
         pass
@@ -20,6 +26,11 @@ def load_pcapng_module():
         return []
 
     dummy_scapy_all.rdpcap = dummy_rdpcap
+
+    class DummyField:
+        pass
+
+    dummy_scapy_fields.Field = DummyField
 
     class DummyLayer:
         pass
@@ -38,10 +49,27 @@ def load_pcapng_module():
     ]:
         setattr(dummy_layers_bluetooth, name, type(name, (DummyLayer,), {}))
 
+    for name in [
+        "BTLE",
+        "BTLE_ADV",
+        "BTLE_ADV_DIRECT_IND",
+        "BTLE_ADV_IND",
+        "BTLE_ADV_NONCONN_IND",
+        "BTLE_ADV_SCAN_IND",
+        "BTLE_CONNECT_REQ",
+        "BTLE_PPI",
+        "BTLE_RF",
+        "BTLE_SCAN_REQ",
+        "BTLE_SCAN_RSP",
+    ]:
+        setattr(dummy_layers_bluetooth4le, name, type(name, (DummyLayer,), {}))
+
     sys.modules.setdefault("scapy", dummy_scapy)
     sys.modules.setdefault("scapy.all", dummy_scapy_all)
+    sys.modules.setdefault("scapy.fields", dummy_scapy_fields)
     sys.modules.setdefault("scapy.layers", dummy_layers)
     sys.modules.setdefault("scapy.layers.bluetooth", dummy_layers_bluetooth)
+    sys.modules.setdefault("scapy.layers.bluetooth4LE", dummy_layers_bluetooth4le)
 
     module_path = Path(__file__).resolve().parents[1] / "analysis" / "pcapng_analysis.py"
     spec = importlib.util.spec_from_file_location("pcapng_analysis", module_path)
