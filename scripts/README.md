@@ -2,6 +2,15 @@
 
 This directory contains standalone scripts that automate common WPS workflows.
 
+## Available scripts
+
+* `capture/wps_capture_cli.py`: start a WPS capture and stop on keypress.
+* `capture/wps_cfa_to_cfax_cli.py`: convert `.cfa` captures to `.cfax`.
+* `capture/wps_cfax_to_pcapng_cli.py`: export `.cfax` captures to `.pcapng`.
+* `analysis/wps_pcapng_analyze_cli.py`: analyze a Bluetooth LE `.pcapng` file into JSON.
+* `matter/wps_matter_key_update_from_log.py`: parse Matter logs and update WPS keys during capture.
+* `matter/wps_matter_key_update_from_logr2.py`: legacy Matter key updater with inline defaults.
+
 ## Prerequisites
 
 * Python 3.8+
@@ -114,7 +123,12 @@ python scripts/matter/wps_matter_key_update_from_log.py `
   --output_file_name matter_parsed.log
 ```
 
-** Example (Convert cfa to cfax file format) **
+## Convert CFA to CFAX: `capture/wps_cfa_to_cfax_cli.py`
+
+Convert `.cfa` captures to `.cfax` using WPS automation.
+
+**Example**
+
 Windows PowerShell:
 
 ```powershell
@@ -124,10 +138,23 @@ python .\scripts\capture\wps_cfa_to_cfax_cli.py `
    C:\Users\potto\projects\tmp
 ```
 
+## Convert CFAX to PCAPNG: `capture/wps_cfax_to_pcapng_cli.py`
+
+Export `.cfax` captures to `.pcapng` with optional technology filters.
+
+**Example**
+
+```powershell
+python scripts/capture/wps_cfax_to_pcapng_cli.py "D:\captures" --recursive --skip-existing --technology-filter LE
+```
+
+## Legacy Matter key updater: `matter/wps_matter_key_update_from_logr2.py`
+
+Legacy variant that uses inline defaults for WPS paths, device configuration, and capture settings.
+
 ## Notes
 
-* Both scripts assume the WPS automation server is reachable at `192.168.58.1:22901` by default.
-* Update the constants near the top of each script if your WPS install path or network setup differs.
+* Defaults for WPS paths and automation server IPs differ by script; check the constants near the top of each file.
 
 ## PCAPNG analysis: `analysis/wps_pcapng_analyze_cli.py`
 
