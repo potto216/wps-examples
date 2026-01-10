@@ -14,6 +14,7 @@ from urllib.request import Request, urlopen
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 import matplotlib.colors as mcolors
+import matplotlib.cm as cm
 import numpy as np
 import pandas as pd
 from matplotlib.collections import LineCollection
@@ -569,31 +570,38 @@ def plot_packets_on_map(
     *,
     track_style: TrackStyle,
     density_config: DensityLineConfig,
+    show_packets: bool = True,
     verbose: bool = False,
     show: bool = True,
 ) -> None:
-    if packet_df.empty:
+    if packet_df.empty and show_packets:
         raise ValueError("No Bluetooth packets were found in the capture.")
 
-    events_with_locations = interpolate_gps_events(
-        gps_df,
-        packet_df,
-        gps_time_col=GpsColumns.timestamp,
-        event_time_col="timestamp",
-        lat_col=GpsColumns.latitude,
-        lon_col=GpsColumns.longitude,
-    )
-    events_with_locations = events_with_locations.dropna(
-        subset=[GpsColumns.latitude, GpsColumns.longitude]
-    )
+    events_with_locations: Optional[pd.DataFrame]
+    if show_packets and not packet_df.empty:
+        events_with_locations = interpolate_gps_events(
+            gps_df,
+            packet_df,
+            gps_time_col=GpsColumns.timestamp,
+            event_time_col="timestamp",
+            lat_col=GpsColumns.latitude,
+            lon_col=GpsColumns.longitude,
+        )
+        events_with_locations = events_with_locations.dropna(
+            subset=[GpsColumns.latitude, GpsColumns.longitude]
+        )
 
-    if verbose:
-        matched = len(events_with_locations)
-        print(f"Packets with interpolated GPS locations: {matched} / {len(packet_df)}")
-        if matched:
-            le_matched = int((events_with_locations["packet_type"] == "le").sum())
-            br_matched = int((events_with_locations["packet_type"] == "br_edr").sum())
-            print(f"Matched by type: LE={le_matched}, BR/EDR={br_matched}")
+        if verbose:
+            matched = len(events_with_locations)
+            print(f"Packets with interpolated GPS locations: {matched} / {len(packet_df)}")
+            if matched:
+                le_matched = int((events_with_locations["packet_type"] == "le").sum())
+                br_matched = int((events_with_locations["packet_type"] == "br_edr").sum())
+                print(f"Matched by type: LE={le_matched}, BR/EDR={br_matched}")
+    else:
+        events_with_locations = None
+        if verbose and not show_packets:
+            print("Packet scatter disabled: --no-packets")
 
     fig, ax = plt.subplots(figsize=(10, 7))
 
@@ -682,7 +690,14 @@ def plot_packets_on_map(
                     linewidths=line_width,
                 )
             )
-            track_label = "GPS Track (density color)"
+            window_s = float(density_config.window.total_seconds())
+            window_label = (
+                f"{int(window_s)}s" if window_s.is_integer() else f"{window_s:g}s"
+            )
+            track_label = (
+                "GPS Track (density color; "
+                f"min={int(round(vmin))}, max={int(round(vmax))} pkts/{window_label})"
+            )
             ax.plot(
                 [],
                 [],
@@ -690,6 +705,26 @@ def plot_packets_on_map(
                 linewidth=line_width,
                 label=track_label,
             )
+
+            # Show a colorbar so the full color range and value range are visible.
+            sm_norm = norm if norm is not None else mcolors.Normalize(vmin=vmin, vmax=vmax)
+            sm = cm.ScalarMappable(norm=sm_norm, cmap=cmap)
+            sm.set_array([])
+            cbar = fig.colorbar(sm, ax=ax, pad=0.02)
+            cbar.set_label(f"Packets per {window_label} window", rotation=90)
+            if vmax > vmin:
+                mid = (vmin + vmax) / 2.0
+                cbar.set_ticks([vmin, mid, vmax])
+                cbar.set_ticklabels(
+                    [
+                        str(int(round(vmin))),
+                        str(int(round(mid))),
+                        str(int(round(vmax))),
+                    ]
+                )
+            else:
+                cbar.set_ticks([vmin])
+                cbar.set_ticklabels([str(int(round(vmin)))])
         else:
             ax.plot(
                 track_x,
@@ -721,86 +756,98 @@ def plot_packets_on_map(
             label=track_label,
         )
 
-    types_present = sorted(events_with_locations["packet_type"].dropna().unique().tolist())
-    if types_present == ["br_edr", "le"] or types_present == ["le", "br_edr"]:
-        le_events = events_with_locations[events_with_locations["packet_type"] == "le"]
-        br_events = events_with_locations[events_with_locations["packet_type"] == "br_edr"]
+    if events_with_locations is not None:
+        types_present = sorted(events_with_locations["packet_type"].dropna().unique().tolist())
+        if types_present == ["br_edr", "le"] or types_present == ["le", "br_edr"]:
+            le_events = events_with_locations[events_with_locations["packet_type"] == "le"]
+            br_events = events_with_locations[events_with_locations["packet_type"] == "br_edr"]
 
-        if not le_events.empty:
-            if use_basemap and basemap_provider == "osm":
-                xs, ys = zip(
-                    *(
-                        _lonlat_to_web_mercator(float(lon), float(lat))
-                        for lon, lat in zip(
-                            le_events[GpsColumns.longitude].tolist(),
-                            le_events[GpsColumns.latitude].tolist(),
+            if not le_events.empty:
+                if use_basemap and basemap_provider == "osm":
+                    xs, ys = zip(
+                        *(
+                            _lonlat_to_web_mercator(float(lon), float(lat))
+                            for lon, lat in zip(
+                                le_events[GpsColumns.longitude].tolist(),
+                                le_events[GpsColumns.latitude].tolist(),
+                            )
                         )
                     )
-                )
-                ax.scatter(xs, ys, color="tab:blue", s=24, label="Bluetooth LE")
-            else:
-                ax.scatter(
-                    le_events[GpsColumns.longitude],
-                    le_events[GpsColumns.latitude],
-                    color="tab:blue",
-                    s=24,
-                    label="Bluetooth LE",
-                )
+                    ax.scatter(xs, ys, color="tab:blue", s=24, label="Bluetooth LE")
+                else:
+                    ax.scatter(
+                        le_events[GpsColumns.longitude],
+                        le_events[GpsColumns.latitude],
+                        color="tab:blue",
+                        s=24,
+                        label="Bluetooth LE",
+                    )
 
-        if not br_events.empty:
-            if use_basemap and basemap_provider == "osm":
-                xs, ys = zip(
-                    *(
-                        _lonlat_to_web_mercator(float(lon), float(lat))
-                        for lon, lat in zip(
-                            br_events[GpsColumns.longitude].tolist(),
-                            br_events[GpsColumns.latitude].tolist(),
+            if not br_events.empty:
+                if use_basemap and basemap_provider == "osm":
+                    xs, ys = zip(
+                        *(
+                            _lonlat_to_web_mercator(float(lon), float(lat))
+                            for lon, lat in zip(
+                                br_events[GpsColumns.longitude].tolist(),
+                                br_events[GpsColumns.latitude].tolist(),
+                            )
                         )
                     )
-                )
-                ax.scatter(xs, ys, color="tab:orange", s=24, label="Bluetooth BR/EDR")
-            else:
-                ax.scatter(
-                    br_events[GpsColumns.longitude],
-                    br_events[GpsColumns.latitude],
-                    color="tab:orange",
-                    s=24,
-                    label="Bluetooth BR/EDR",
-                )
-    else:
-        color_map = _type_color_map(types_present)
-        for pkt_type in types_present:
-            subset = events_with_locations[events_with_locations["packet_type"] == pkt_type]
-            if subset.empty:
-                continue
-            label = pkt_type if pkt_type != "br_edr" else "br_edr"
-            if use_basemap and basemap_provider == "osm":
-                xs, ys = zip(
-                    *(
-                        _lonlat_to_web_mercator(float(lon), float(lat))
-                        for lon, lat in zip(
-                            subset[GpsColumns.longitude].tolist(),
-                            subset[GpsColumns.latitude].tolist(),
+                    ax.scatter(xs, ys, color="tab:orange", s=24, label="Bluetooth BR/EDR")
+                else:
+                    ax.scatter(
+                        br_events[GpsColumns.longitude],
+                        br_events[GpsColumns.latitude],
+                        color="tab:orange",
+                        s=24,
+                        label="Bluetooth BR/EDR",
+                    )
+        else:
+            color_map = _type_color_map(types_present)
+            for pkt_type in types_present:
+                subset = events_with_locations[events_with_locations["packet_type"] == pkt_type]
+                if subset.empty:
+                    continue
+                label = pkt_type if pkt_type != "br_edr" else "br_edr"
+                if use_basemap and basemap_provider == "osm":
+                    xs, ys = zip(
+                        *(
+                            _lonlat_to_web_mercator(float(lon), float(lat))
+                            for lon, lat in zip(
+                                subset[GpsColumns.longitude].tolist(),
+                                subset[GpsColumns.latitude].tolist(),
+                            )
                         )
                     )
-                )
-                ax.scatter(
-                    xs,
-                    ys,
-                    color=color_map.get(pkt_type, "tab:blue"),
-                    s=24,
-                    label=label,
-                )
-            else:
-                ax.scatter(
-                    subset[GpsColumns.longitude],
-                    subset[GpsColumns.latitude],
-                    color=color_map.get(pkt_type, "tab:blue"),
-                    s=24,
-                    label=label,
-                )
+                    ax.scatter(
+                        xs,
+                        ys,
+                        color=color_map.get(pkt_type, "tab:blue"),
+                        s=24,
+                        label=label,
+                    )
+                else:
+                    ax.scatter(
+                        subset[GpsColumns.longitude],
+                        subset[GpsColumns.latitude],
+                        color=color_map.get(pkt_type, "tab:blue"),
+                        s=24,
+                        label=label,
+                    )
 
-    ax.set_title("Bluetooth Packet Locations")
+    def _fmt_ts_title(ts: Optional[pd.Timestamp]) -> str:
+        if ts is None or pd.isna(ts):
+            return "(none)"
+        if getattr(ts, "tzinfo", None) is None:
+            ts_utc = ts.tz_localize("UTC")
+        else:
+            ts_utc = ts.tz_convert("UTC")
+        return ts_utc.strftime("%Y-%m-%d %H:%M:%SZ")
+
+    pkt_tmin = packet_df["timestamp"].min() if not packet_df.empty else None
+    pkt_tmax = packet_df["timestamp"].max() if not packet_df.empty else None
+    ax.set_title(f"Bluetooth Packet Locations\n{_fmt_ts_title(pkt_tmin)} .. {_fmt_ts_title(pkt_tmax)}")
     if use_basemap and basemap_provider == "osm":
         ax.set_xlabel("Web Mercator X (m)")
         ax.set_ylabel("Web Mercator Y (m)")
@@ -941,6 +988,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "Plot Bluetooth packet locations with a different color per packet type. "
             "For LE packets, this groups by Scapy 2.7 BTLE_ADV_* / SCAN_* / CONNECT_REQ layers "
             "when available; otherwise it falls back to a single LE category."
+        ),
+    )
+    parser.add_argument(
+        "--no-packets",
+        action="store_true",
+        help=(
+            "Do not plot packet scatter points on the map (still uses packet timestamps for the density line)."
         ),
     )
     parser.add_argument(
@@ -1108,6 +1162,7 @@ def main() -> None:
         packet_df,
         track_style=track_style,
         density_config=density_config,
+        show_packets=not bool(args.no_packets),
         verbose=args.verbose,
         show=False,
     )
