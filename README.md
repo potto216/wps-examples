@@ -22,6 +22,18 @@ Notebooks live under `notebooks/` grouped by workflow (capture, analysis, audio,
   `notebooks/analysis/show_le_pcapng.ipynb` and in scripts under `analysis/`. See `analysis/README.md` for usage
   and schema details.
 
+## Scripts
+
+Standalone automation scripts are available under `scripts/`:
+
+* `scripts/capture/wps_capture_cli.py`: start a WPS capture and stop on keypress.
+* `scripts/capture/wps_cfa_to_cfax_cli.py`: convert `.cfa` captures to `.cfax`.
+* `scripts/capture/wps_cfax_to_pcapng_cli.py`: export `.cfax` captures to `.pcapng`.
+* `scripts/analysis/wps_pcapng_analyze_cli.py`: analyze a Bluetooth LE `.pcapng` file into JSON.
+* `scripts/matter/wps_matter_key_update_from_log.py`: parse Matter logs and update WPS keys during capture.
+* `scripts/matter/wps_matter_key_update_from_logr2.py`: legacy Matter key updater with inline defaults.
+
+See `scripts/README.md` for details and usage examples.
 
 # Setup
 
