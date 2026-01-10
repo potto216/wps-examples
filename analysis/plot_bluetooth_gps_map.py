@@ -694,18 +694,6 @@ def plot_packets_on_map(
             window_label = (
                 f"{int(window_s)}s" if window_s.is_integer() else f"{window_s:g}s"
             )
-            track_label = (
-                "GPS Track (density color; "
-                f"min={int(round(vmin))}, max={int(round(vmax))} pkts/{window_label})"
-            )
-            ax.plot(
-                [],
-                [],
-                color=cmap(1.0),
-                linewidth=line_width,
-                label=track_label,
-            )
-
             # Show a colorbar so the full color range and value range are visible.
             sm_norm = norm if norm is not None else mcolors.Normalize(vmin=vmin, vmax=vmax)
             sm = cm.ScalarMappable(norm=sm_norm, cmap=cmap)
@@ -847,7 +835,7 @@ def plot_packets_on_map(
 
     pkt_tmin = packet_df["timestamp"].min() if not packet_df.empty else None
     pkt_tmax = packet_df["timestamp"].max() if not packet_df.empty else None
-    ax.set_title(f"Bluetooth Packet Locations\n{_fmt_ts_title(pkt_tmin)} .. {_fmt_ts_title(pkt_tmax)}")
+    ax.set_title(f"Bluetooth Packet Locations\n{_fmt_ts_title(pkt_tmin)} to {_fmt_ts_title(pkt_tmax)}")
     if use_basemap and basemap_provider == "osm":
         ax.set_xlabel("Web Mercator X (m)")
         ax.set_ylabel("Web Mercator Y (m)")
