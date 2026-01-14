@@ -31,7 +31,7 @@ TCP_IP = "127.0.0.1"
 TCP_PORT = 22901
 MAX_TO_READ = 1000
 SLEEP_TIME = 2
-MAX_WAIT_TIME = 60
+MAX_WAIT_TIME = 240
 
 DEFAULT_WPS_BASE_DIR = r"C:\Program Files (x86)\Teledyne LeCroy Wireless"
 DEFAULT_DATA_PATH = r"C:\Users\Public\Documents\Teledyne LeCroy Wireless\My Capture Files"
@@ -197,7 +197,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Start a WPS capture for Bluetooth LE and BR/EDR and stop on keypress."
     )
-    parser.add_argument("--equipment", choices=["X240", "X500", "X600"], default="X240")
+    parser.add_argument("--equipment", choices=["X240", "X500", "X500e"], default="X240")
     parser.add_argument("--prefix", default="", help="Prefix for the capture filename.")
     parser.add_argument("--data-path", default=DEFAULT_DATA_PATH, help="Directory to store capture files.")
     parser.add_argument("--capture-technology", help="Full capturetechnology string to pass to WPS.")
