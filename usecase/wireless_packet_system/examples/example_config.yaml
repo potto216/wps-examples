@@ -1,0 +1,18 @@
+database:
+  host: localhost
+  port: 5432
+  name: packetdb
+  user: packet_user
+  password: packet_password
+
+capture_device: sensor-01
+protocol: bluetooth
+
+analysis:
+  anomaly_threshold_zscore: 3.0
+  interval_bucket_seconds: 60
+
+llm:
+  provider: openai
+  model: gpt-4o-mini
+  api_key_env: OPENAI_API_KEY

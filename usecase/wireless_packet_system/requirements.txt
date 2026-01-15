@@ -1,0 +1,9 @@
+psycopg[binary]>=3.1.18
+pandas>=2.2.2
+numpy>=1.26.4
+ijson>=3.2.3
+PyYAML>=6.0.1
+python-dateutil>=2.9.0
+pyod>=1.1.3
+gpxpy>=1.6.2
+fastkml>=0.12
