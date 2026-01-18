@@ -4,11 +4,13 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+import pandas as pd
 
 # Allow running this script directly from any working directory.
 # (The repository root contains the top-level `analysis/` package.)
@@ -97,6 +99,24 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--automated",
+        action="store_true",
+        help=(
+            "Run in automated mode: save the map image and density JSON output instead of "
+            "opening interactive windows."
+        ),
+    )
+    parser.add_argument(
+        "--map-output",
+        default="bluetooth_gps_map.png",
+        help="Output path for the map image (used with --automated).",
+    )
+    parser.add_argument(
+        "--density-output",
+        default="bluetooth_density.json",
+        help="Output path for density data in JSON format (used with --automated).",
+    )
+    parser.add_argument(
         "--basemap",
         default="none",
         choices=["none", "osm"],
@@ -139,6 +159,7 @@ def main() -> None:
     )
     track_style = plot_map._parse_track_style(config)
     density_config = plot_map._parse_density_config(config, enabled=bool(args.density_line))
+    density_export_config = plot_map._parse_density_config(config, enabled=True)
     if args.verbose:
         if config_path.exists():
             print(f"Plot config loaded: {config_path}")
@@ -260,7 +281,78 @@ def main() -> None:
         verbose=args.verbose,
         show=False,
     )
-    plt.show(block=True)
+
+    if args.automated:
+        map_output = Path(args.map_output)
+        map_output.parent.mkdir(parents=True, exist_ok=True)
+        map_fig = plt.gcf()
+        map_fig.savefig(map_output, dpi=150, bbox_inches="tight")
+
+        density_packet_df = packet_df
+        if density_export_config.packet_types:
+            density_packet_df = density_packet_df[
+                density_packet_df["packet_type"].isin(density_export_config.packet_types)
+            ]
+        gps_times = gps_df[plot_map.GpsColumns.timestamp]
+        packet_times = (
+            density_packet_df["timestamp"] if not density_packet_df.empty else gps_times.iloc[:0]
+        )
+        counts = plot_map._count_packets_in_window(
+            gps_times,
+            packet_times,
+            density_export_config.window,
+        )
+
+        def _format_ts(ts: object) -> str:
+            ts_val = pd.to_datetime(ts, utc=True, errors="coerce")
+            if ts_val is None or pd.isna(ts_val):
+                return ""
+            ts_val = ts_val.tz_convert("UTC")
+            return ts_val.isoformat().replace("+00:00", "Z")
+
+        density_rows = []
+        for idx, row in enumerate(gps_df.itertuples(index=False)):
+            density_rows.append(
+                {
+                    "timestamp": _format_ts(getattr(row, plot_map.GpsColumns.timestamp)),
+                    "latitude": float(getattr(row, plot_map.GpsColumns.latitude)),
+                    "longitude": float(getattr(row, plot_map.GpsColumns.longitude)),
+                    "packet_count": int(round(float(counts[idx]))),
+                }
+            )
+
+        density_payload = {
+            "source": {
+                "pcapng": str(args.pcapng),
+                "gps": str(args.gps),
+                "gps_type": args.gps_type,
+                "pcap_time_offset": str(pcap_time_offset),
+                "config": str(config_path),
+            },
+            "filter": {
+                "start": plot_map._fmt_ts(start_ts),
+                "stop": plot_map._fmt_ts(stop_ts),
+                "stop_is_exclusive": stop_is_exclusive,
+            },
+            "density": {
+                "window_seconds": float(density_export_config.window.total_seconds()),
+                "packet_types": density_export_config.packet_types,
+                "points": density_rows,
+            },
+        }
+
+        density_output = Path(args.density_output)
+        density_output.parent.mkdir(parents=True, exist_ok=True)
+        density_output.write_text(
+            json.dumps(density_payload, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        if args.verbose:
+            print(f"Map image saved: {map_output}")
+            print(f"Density data saved: {density_output}")
+        plt.close("all")
+    else:
+        plt.show(block=True)
 
 
 if __name__ == "__main__":
