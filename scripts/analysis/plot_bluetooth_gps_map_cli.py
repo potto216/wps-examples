@@ -107,14 +107,25 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--output-base",
+        help=(
+            "Base filename (with optional path) for automated outputs. "
+            "Produces <base>.png and <base>.json unless overridden by --map-output/--density-output."
+        ),
+    )
+    parser.add_argument(
         "--map-output",
-        default="bluetooth_gps_map.png",
-        help="Output path for the map image (used with --automated).",
+        help=(
+            "Output path for the map image (used with --automated). "
+            "Default: bluetooth_gps_map.png, or <base>.png when --output-base is provided."
+        ),
     )
     parser.add_argument(
         "--density-output",
-        default="bluetooth_density.json",
-        help="Output path for density data in JSON format (used with --automated).",
+        help=(
+            "Output path for density data in JSON format (used with --automated). "
+            "Default: bluetooth_density.json, or <base>.json when --output-base is provided."
+        ),
     )
     parser.add_argument(
         "--basemap",
@@ -283,7 +294,24 @@ def main() -> None:
     )
 
     if args.automated:
-        map_output = Path(args.map_output)
+        if args.output_base:
+            output_base = Path(args.output_base)
+            map_output = (
+                Path(args.map_output)
+                if args.map_output
+                else output_base.with_suffix(".png")
+            )
+            density_output = (
+                Path(args.density_output)
+                if args.density_output
+                else output_base.with_suffix(".json")
+            )
+        else:
+            map_output = Path(args.map_output) if args.map_output else Path("bluetooth_gps_map.png")
+            density_output = (
+                Path(args.density_output) if args.density_output else Path("bluetooth_density.json")
+            )
+
         map_output.parent.mkdir(parents=True, exist_ok=True)
         map_fig = plt.gcf()
         map_fig.savefig(map_output, dpi=150, bbox_inches="tight")
@@ -341,7 +369,6 @@ def main() -> None:
             },
         }
 
-        density_output = Path(args.density_output)
         density_output.parent.mkdir(parents=True, exist_ok=True)
         density_output.write_text(
             json.dumps(density_payload, indent=2, sort_keys=True),
