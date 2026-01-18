@@ -63,7 +63,7 @@ LE_ADV_TYPE_LAYERS: tuple[tuple[object, str], ...] = tuple(
     if layer is not None
 )
 
-from gps import GpsColumns, interpolate_gps_events, load_gpx, load_kml
+from .gps import GpsColumns, interpolate_gps_events, load_gpx, load_kml
 
 
 WEB_MERCATOR_RADIUS_M = 6378137.0
