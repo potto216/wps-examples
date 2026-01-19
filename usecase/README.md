@@ -102,3 +102,13 @@ pip install streamlit pandas numpy matplotlib scipy soundfile
    - **Compute Packet Statistics:**  
      Click the button to compute and display wireless packet counts for the selected time range. These statistics can help identify potential interference issues affecting the audio broadcast.
 
+# Wireshark notes
+For the tshark tools in windows make sure the path is to C:\Program Files\Wireshark;
+
+-r input.pcapng → Read from the capture file.
+-c 1000 → Stop after reading 1000 packets/frames.
+-T json → Output in JSON format.
+> output.json → Save to a file.
+
+tshark -r bredr_le_spectrum_2025_12_30_1700.pcapng -T json -c 1000 > bredr_le_spectrum_2025_12_30_1700.json
+
