@@ -18,6 +18,9 @@ from wpshelper import (
     wps_find_installations,
     wps_open,
     wps_open_capture,
+    wps_wireless_devices,
+    wps_analyze_capture,
+    wps_close_capture
 )
 
 TCP_IP = "127.0.0.1"
@@ -104,14 +107,23 @@ def resolve_function_params(
     signature = inspect.signature(function)
     params = signature.parameters
     kwargs: Dict[str, object] = {}
-    if include_show_log and "show_log" in params:
+
+    # If the target accepts **kwargs, it is safe to pass optional flags
+    # even if they are not explicitly declared.
+    accepts_kwargs = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+
+    if include_show_log and ("show_log" in params or accepts_kwargs):
         kwargs["show_log"] = True
 
     if technology_filter:
         for name in ("technology_filter", "filter", "technology", "tech_filter"):
             if name in params:
                 return kwargs, name
-        return kwargs, "technology_filter"
+        if accepts_kwargs:
+            return kwargs, "technology_filter"
+        # Not supported by this wpshelper version; caller should ignore.
+        return kwargs, None
+
     return kwargs, None
 
 
@@ -126,14 +138,22 @@ def export_capture(
     logger.info("Opening capture %s", cfax_path)
     open_kwargs, _ = resolve_function_params(wps_open_capture, verbose)
     wps_open_capture(wps_handle, cfax_path, **open_kwargs)
+    wps_wireless_devices(wps_handle, action="select", action_parameters={'type':'bluetooth','address':'all','select':'yes'}, show_log=True)
+    wps_analyze_capture(wps_handle,show_log=True)
     logger.info("Exporting pcapng to %s", pcapng_path)
+    time.sleep(5)
     export_kwargs, filter_param = resolve_function_params(
         wps_export_pcapng,
         verbose,
         technology_filter=technology_filter,
     )
-    if filter_param:
+    if filter_param and technology_filter:
         export_kwargs[filter_param] = technology_filter
+    elif technology_filter:
+        logger.debug(
+            "wps_export_pcapng does not accept a technology filter parameter; continuing without --technology-filter=%s",
+            technology_filter,
+        )
     wps_export_pcapng(wps_handle, pcapng_path, **export_kwargs)
 
 
@@ -225,20 +245,32 @@ def main() -> None:
             recv_retry_attempts=10,
             recv_retry_sleep=5,
         )
-
+        close_previous_capture=False
         for cfax_path in cfax_files:
+            if close_previous_capture:
+                # TODO: Resolve why getting this error:
+                # 2026-01-18 23:50:53,237 INFO Opening capture x240_bredr_le_2m_20260114_064910.cfax
+                # wps_open_capture: sending: b'Open Capture File;x240_bredr_le_2m_20260114_064910.cfax;notify=1'
+                # _recv_and_parse: PCAPNG EXPORT;FAILED;Timestamp=1/18/2026 11:50:57 PM;Reason=Could not open capture  file             
+                time.sleep(10)
+                # Adding a delay because getting this unusual error
+                logger.info("Slept now closing and  starting the next file")
+                wps_close_capture(wps_handle,capture_absolute_filename=cfax_path, show_log=args.verbose)
+
             pcapng_path = pcapng_path_for(cfax_path)
             if args.skip_existing and os.path.exists(pcapng_path):
                 logger.info("Skipping %s (pcapng already exists)", cfax_path)
                 continue
             export_capture(wps_handle, cfax_path, args.verbose, args.technology_filter, logger)
             logger.info("Converted %s -> %s", cfax_path, pcapng_path)
+
+
     except Exception as exc:
         logger.exception("Conversion failed: %s", exc)
         raise
     finally:
         if wps_handle:
-            wps_close(wps_handle)
+            wps_close(wps_handle, show_log=args.verbose)
         if server_process:
             server_process.terminate()
 
