@@ -136,25 +136,26 @@ def export_capture(
 ) -> None:
     pcapng_path = pcapng_path_for(cfax_path)
     logger.info("Opening capture %s", cfax_path)
-    open_kwargs, _ = resolve_function_params(wps_open_capture, verbose)
-    wps_open_capture(wps_handle, cfax_path, **open_kwargs)
-    wps_wireless_devices(wps_handle, action="select", action_parameters={'type':'bluetooth','address':'all','select':'yes'}, show_log=True)
-    wps_analyze_capture(wps_handle,show_log=True)
+    #open_kwargs, _ = resolve_function_params(wps_open_capture, verbose)
+
+    wps_open_capture(wps_handle, cfax_path, show_log=verbose)
+    wps_wireless_devices(wps_handle, action="select", action_parameters={'type':'bluetooth','address':'all','select':'yes'}, show_log=verbose)
+    wps_analyze_capture(wps_handle,show_log=verbose)
     logger.info("Exporting pcapng to %s", pcapng_path)
     time.sleep(5)
-    export_kwargs, filter_param = resolve_function_params(
-        wps_export_pcapng,
-        verbose,
-        technology_filter=technology_filter,
-    )
-    if filter_param and technology_filter:
-        export_kwargs[filter_param] = technology_filter
-    elif technology_filter:
-        logger.debug(
-            "wps_export_pcapng does not accept a technology filter parameter; continuing without --technology-filter=%s",
-            technology_filter,
-        )
-    wps_export_pcapng(wps_handle, pcapng_path, **export_kwargs)
+    # export_kwargs, filter_param = resolve_function_params(
+    #     wps_export_pcapng,
+    #     verbose,
+    #     technology_filter=technology_filter,
+    # )
+    # if filter_param and technology_filter:
+    #     export_kwargs[filter_param] = technology_filter
+    # elif technology_filter:
+    #     logger.debug(
+    #         "wps_export_pcapng does not accept a technology filter parameter; continuing without --technology-filter=%s",
+    #         technology_filter,
+    #     )
+    wps_export_pcapng(wps_handle, pcapng_path, tech=technology_filter, show_log=verbose)
 
 
 def main() -> None:
@@ -263,7 +264,14 @@ def main() -> None:
                 continue
             export_capture(wps_handle, cfax_path, args.verbose, args.technology_filter, logger)
             logger.info("Converted %s -> %s", cfax_path, pcapng_path)
-
+            close_previous_capture=True
+            
+            # This is temorary to close the capture between files to avoid errors
+            wps_close(wps_handle, show_log=args.verbose)
+            server_process.terminate()
+            # terminate the program
+            sys.exit(0)
+           
 
     except Exception as exc:
         logger.exception("Conversion failed: %s", exc)
