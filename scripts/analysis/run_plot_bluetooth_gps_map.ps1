@@ -75,14 +75,26 @@ function Test-PathHasIgnoredDirectory {
         return $false
     }
 
-    $separators = @([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
-    $parts = $Path.Split($separators, [System.StringSplitOptions]::RemoveEmptyEntries)
-    foreach ($part in $parts) {
+    # Start from the containing directory if $Path is a file path
+    $dir = Split-Path -Path $Path -Parent
+    if (-not $dir) {
+        return $false
+    }
+
+    while ($true) {
+        $leaf = Split-Path -Path $dir -Leaf
         foreach ($ignored in $IgnoredNames) {
-            if ($part.Equals($ignored, [System.StringComparison]::OrdinalIgnoreCase)) {
+            if ($leaf.Equals($ignored, [System.StringComparison]::OrdinalIgnoreCase)) {
                 return $true
             }
         }
+
+        $parent = Split-Path -Path $dir -Parent
+        if (-not $parent -or $parent -eq $dir) {
+            break
+        }
+
+        $dir = $parent
     }
 
     return $false
@@ -114,6 +126,9 @@ foreach ($pcap in $pcapFiles) {
     }
 
     $basePath = [System.IO.Path]::ChangeExtension($pcap.FullName, $null)
+    if ($basePath.EndsWith('.')) {
+        $basePath = $basePath.TrimEnd('.')
+    }
     $gpsPath = "$basePath.gpx"
     $pngPath = "$basePath.png"
     $jsonPath = "$basePath.json"
