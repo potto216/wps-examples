@@ -101,17 +101,27 @@ def start_server(auto_server_path: str, logger: logging.Logger) -> Optional[subp
     return process
 
 
-def wait_for_keypress(stop_key: str, logger: logging.Logger) -> None:
-    logger.info("Waiting for key '%s' to stop capture.", stop_key)
+def wait_for_keypress(stop_key: str, logger: logging.Logger, max_seconds: Optional[float] = None) -> str:
+    if max_seconds is not None:
+        logger.info("Waiting for key '%s' to stop capture (max %s seconds).", stop_key, max_seconds)
+    else:
+        logger.info("Waiting for key '%s' to stop capture.", stop_key)
     stop_key = stop_key.lower()
+    start - time.monotonic()
+
+    def timed_out() -> bool:
+        return max_seconds is not None and (time.monotonic() - start) >= max_seconds
+ 
     try:
         import msvcrt
 
         while True:
+            if timed_out():
+                return "timeout"
             if msvcrt.kbhit():
                 char = msvcrt.getwch().lower()
                 if char == stop_key:
-                    return
+                    return "stop-key"
             time.sleep(0.1)
     except ImportError:
         import select
@@ -123,11 +133,13 @@ def wait_for_keypress(stop_key: str, logger: logging.Logger) -> None:
         try:
             tty.setraw(fd)
             while True:
+                if timed_out():
+                    return "timeout"
                 ready, _, _ = select.select([sys.stdin], [], [], 0.2)
                 if ready:
                     char = sys.stdin.read(1).lower()
                     if char == stop_key:
-                        return
+                        return "stop-key"
         finally:
             termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
 
@@ -181,6 +193,8 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--sleep-time must be a positive number of seconds.")
     if args.max_wait_time <= 0:
         raise ValueError("--max-wait-time must be a positive number of seconds.")
+    if getattr(args, "max_capture_seconds", None) is not None and args.max_capture_seconds <= 0:
+        raise ValueError("--max-capture-seconds must be a positive number of seconds.")
 
 
 def main() -> None:
@@ -206,15 +220,16 @@ def main() -> None:
     parser.add_argument("--bredr", dest="bredr", action="store_true", default=True, help="Enable BR/EDR capture.")
     parser.add_argument("--no-bredr", dest="bredr", action="store_false", help="Disable BR/EDR capture.")
     parser.add_argument("--spectrum", action="store_true", help="Enable spectrum capture.")
-    parser.add_argument("--spectrum-interval", type=int, help="Spectrum interval in ms when enabled.")
+    parser.add_argument("--spectrum-interval", type=int, help="Spectrum interval in microseconds when enabled (200, 100, 50, 20).")
     parser.add_argument("--log-level", default="info", help="Log level (debug, info, warning, error, critical).")
     parser.add_argument("--log-file", required=True, help="Path to the log file.")
     parser.add_argument("--stop-key", default="q", help="Key to stop the capture.")
+    parser.add_argument("--max-capture-seconds", type=float, default=None, help="Optional max capture time in seconds; when exceeded, capture stops automatically.")
     parser.add_argument("--auto-server-path", help="Path to FTSAutoServer.exe.")
     parser.add_argument(
         "--wps-path",
         default=DEFAULT_WPS_PATH,
-        help="Base path for WPS install (defaults to latest detected installation when available).",
+        help=f"Base path for WPS install (defaults to latest detected installation when available). (Default: {DEFAULT_WPS_PATH})",
     )
     parser.add_argument("--extension", default=".cfax", help="Capture file extension (default: .cfax).")
     parser.add_argument(
@@ -290,13 +305,19 @@ def main() -> None:
             )
         wps_configure(wps_handle, args.equipment, capture_technology, show_log=True)
         wps_start_record(wps_handle, show_log=True)
-        logger.info("Capture started. Press '%s' to stop.", args.stop_key)
+        if args.max_capture_seconds is not None:
+            logger.info("Capture started. Press '%s' to stop. Maximum capture time: %s seconds.", args.stop_key, args.max_capture_seconds)
+        else:
+            logger.info("Capture started. Press '%s' to stop.", args.stop_key)
         try:
             request_console_focus()
         except Exception as exc:
             logger.warning("Unable to request console focus: %s", exc)
-        wait_for_keypress(args.stop_key, logger)
-        logger.info("Stop key pressed. Stopping capture.")
+        stop_reason = wait_for_keypress(args.stop_key, logger, args.max_capture_seconds)
+        if stop_reason == "timeout":
+            logger.info("Maximum capture time exceeded. Stopping capture.") 
+        else:
+            logger.info("Stop key pressed. Stopping capture.")
         wps_stop_record(wps_handle, show_log=True)
         wps_analyze_capture(wps_handle,show_log=True)
         wps_save_capture(wps_handle, capture_file,show_log=True)
