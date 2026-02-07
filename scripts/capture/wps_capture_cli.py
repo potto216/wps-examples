@@ -107,7 +107,7 @@ def wait_for_keypress(stop_key: str, logger: logging.Logger, max_seconds: Option
     else:
         logger.info("Waiting for key '%s' to stop capture.", stop_key)
     stop_key = stop_key.lower()
-    start - time.monotonic()
+    start = time.monotonic()
 
     def timed_out() -> bool:
         return max_seconds is not None and (time.monotonic() - start) >= max_seconds
