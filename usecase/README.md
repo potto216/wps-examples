@@ -112,3 +112,7 @@ For the tshark tools in windows make sure the path is to C:\Program Files\Wiresh
 
 tshark -r bredr_le_spectrum_2025_12_30_1700.pcapng -T json -c 1000 > bredr_le_spectrum_2025_12_30_1700.json
 
+
+## Additional examples
+
+- `usecase/llm_rag_ml/README.md`: LLM-guided statistical analyst demo for BLE + Wi-Fi tables with optional anomaly detection.
