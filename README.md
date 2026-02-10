@@ -36,7 +36,9 @@ Standalone automation scripts are available under `scripts/`:
 See `scripts/README.md` for details and usage examples.
 
 # Setup
+## Python
 
+## Repository 
 Clone the repository with
 ```
 git clone --recursive https://github.com/potto216/wps-examples.git

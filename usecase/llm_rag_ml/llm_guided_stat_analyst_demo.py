@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -15,6 +17,62 @@ try:
     from openai import OpenAI
 except Exception:  # pragma: no cover - optional dependency for local demo
     OpenAI = None
+
+LOG_LEVELS = {"debug", "info", "warning", "error", "critical"}
+LOG_TO_CHOICES = {"stdout", "file"}
+logger = logging.getLogger("llm_guided_stat_analyst_demo")
+
+
+def configure_logging(log_level: str, *, log_to: str, log_file: Optional[str]) -> None:
+    level = str(log_level).strip().lower()
+    if level not in LOG_LEVELS:
+        raise ValueError(f"Invalid --log-level '{log_level}'. Expected one of {sorted(LOG_LEVELS)}")
+    dest = str(log_to).strip().lower()
+    if dest not in LOG_TO_CHOICES:
+        raise ValueError(f"Invalid --log-to '{log_to}'. Expected one of {sorted(LOG_TO_CHOICES)}")
+    handlers: list[logging.Handler] = []
+    if dest == "stdout":
+        handlers.append(logging.StreamHandler(sys.stdout))
+    else:
+        file_name = (log_file or "llm_guided_stat_analyst_demo.log").strip()
+        log_path = Path(file_name)
+        if not log_path.is_absolute():
+            log_path = Path.cwd() / log_path
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        handlers.append(logging.FileHandler(log_path, encoding="utf-8"))
+    logging.basicConfig(
+        level=getattr(logging, level.upper()),
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+        handlers=handlers,
+    )
+    logger.info("Logging configured level=%s destination=%s", level, dest)
+    if dest == "file":
+        logger.info("Logging to file=%s", str(log_path))
+
+
+def _openai_response_to_jsonable(response: Any) -> Any:
+    if response is None:
+        return None
+    # openai-python v1 objects are pydantic-like and typically expose model_dump()
+    for attr in ("model_dump", "to_dict", "dict", "to_dict_recursive"):
+        fn = getattr(response, attr, None)
+        if callable(fn):
+            try:
+                return fn()
+            except Exception:
+                pass
+    # Best-effort fallback: try __dict__ then string
+    try:
+        return dict(getattr(response, "__dict__", {}))
+    except Exception:
+        return str(response)
+
+
+def _json_dumps_safe(obj: Any) -> str:
+    try:
+        return json.dumps(obj, indent=2, sort_keys=True, default=str)
+    except Exception:
+        return str(obj)
 
 
 @dataclass
@@ -34,18 +92,32 @@ class DemoAnalyst:
         wifi_path = data_dir / "wifi_mgmt_frames.csv"
         metadata_path = data_dir / "metadata.json"
 
+        logger.info("Initializing analyst data_dir=%s", str(data_dir))
         if ble_path.exists() and wifi_path.exists():
+            logger.info("Loading CSV tables ble=%s wifi=%s", str(ble_path), str(wifi_path))
             self.tables = {
                 "ble_adv_events": pd.read_csv(ble_path, parse_dates=["timestamp"]),
                 "wifi_mgmt_frames": pd.read_csv(wifi_path, parse_dates=["timestamp"]),
             }
         else:
+            logger.info("CSV tables missing; using built-in synthetic demo tables")
             self.tables = self._demo_tables()
 
+        try:
+            logger.info(
+                "Tables loaded rows ble_adv_events=%d wifi_mgmt_frames=%d",
+                int(len(self.tables.get("ble_adv_events", []))),
+                int(len(self.tables.get("wifi_mgmt_frames", []))),
+            )
+        except Exception:
+            logger.debug("Could not log table sizes", exc_info=True)
+
         if metadata_path.exists():
+            logger.info("Loading metadata=%s", str(metadata_path))
             with open(metadata_path, "r", encoding="utf-8") as handle:
                 self.metadata = json.load(handle)
         else:
+            logger.info("Metadata missing; using synthetic metadata")
             self.metadata = {
                 "environment": "synthetic_demo",
                 "known_devices_present": sorted(
@@ -105,14 +177,24 @@ class DemoAnalyst:
         return {"ble_adv_events": ble, "wifi_mgmt_frames": wifi}
 
     def generate_plan(self, request: AnalysisRequest) -> Dict[str, Any]:
+        logger.info("Generating plan planner=%s model=%s", request.planner, request.model)
         if request.planner == "llm":
             plan = self._llm_plan(request)
             if plan:
+                logger.info("LLM planner returned a plan")
+                logger.debug("LLM plan JSON=%s", _json_dumps_safe(plan))
                 return plan
+            logger.warning("LLM planner unavailable/failed; falling back to heuristic planner")
         return self._heuristic_plan(request.question)
 
     def _llm_plan(self, request: AnalysisRequest) -> Optional[Dict[str, Any]]:
-        if OpenAI is None or not os.getenv("OPENAI_API_KEY"):
+        api_key_set = bool(os.getenv("OPENAI_API_KEY"))
+        if OpenAI is None or not api_key_set:
+            logger.info(
+                "LLM planner not available openai_imported=%s OPENAI_API_KEY_set=%s",
+                OpenAI is not None,
+                api_key_set,
+            )
             return None
 
         prompt = (
@@ -120,21 +202,129 @@ class DemoAnalyst:
             "plot, anomaly. Datasets available: ble_adv_events and wifi_mgmt_frames. "
             f"Question: {request.question}"
         )
+
+        # Prefer `developer` message for instructions (replaces `system` for newer models).
+        messages = [
+            {"role": "developer", "content": "You are a wireless packet analytics planner."},
+            {"role": "user", "content": prompt},
+        ]
+
+        # Strict schema for the plan you expect.
+        plan_schema = {
+            "name": "analysis_plan",
+            "description": "Planner output for wireless packet analytics.",
+            "strict": True,
+            "schema": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["dataset", "filters", "groupby", "metrics", "plot", "anomaly"],
+                "properties": {
+                    "dataset": {"type": "string", "enum": ["ble_adv_events", "wifi_mgmt_frames"]},
+
+                    "filters": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": ["col", "op", "value"],
+                            "properties": {
+                                "col": {"type": "string"},
+                                "op": {"type": "string"},
+                                "value": {"type": "string"},
+                            },
+                        },
+                    },
+
+                    "groupby": {"type": "array", "items": {"type": "string"}},
+
+                    "metrics": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,  # <-- MUST be false
+                            "required": ["name"],
+                            "properties": {
+                                "name": {"type": "string"},
+                            },
+                        },
+                    },
+
+                    "plot": {
+                        "type": "object",
+                        "additionalProperties": False,  # <-- MUST be false
+                        "required": ["type", "x", "y"],
+                        "properties": {
+                            "type": {"type": "string"},
+                            "x": {"type": "string"},
+                            "y": {"type": "string"},
+                        },
+                    },
+
+                    "anomaly": {
+                        "type": "object",
+                        "additionalProperties": False,  # <-- MUST be false
+                        "required": ["method", "on", "threshold"],
+                        "properties": {
+                            "method": {"type": "string"},
+                            "on": {"type": "string"},
+                            "threshold": {"type": "number"},
+                        },
+                    },
+                },
+            },
+        }
+
+
         client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-        response = client.chat.completions.create(
-            model=request.model,
-            messages=[
-                {"role": "system", "content": "You are a wireless packet analytics planner."},
-                {"role": "user", "content": prompt},
-            ],
-            temperature=0.0,
-        )
+
+        # Build kwargs without temperature (gpt-5-nano rejects non-default temperature).
+        kwargs: Dict[str, Any] = {
+            "model": request.model,
+            "messages": messages,
+            "response_format": {"type": "json_schema", "json_schema": plan_schema},
+            # Optional: reduce reasoning cost/speed; models before gpt-5.1 default to medium. :contentReference[oaicite:3]{index=3}
+            "reasoning_effort": "minimal",
+        }
+
+        logger.info("OpenAI chat.completions.create model=%s", request.model)
+        logger.debug("OpenAI request payload=%s", _json_dumps_safe(kwargs))
+
         try:
-            return json.loads(response.choices[0].message.content)
+            response = client.chat.completions.create(**kwargs)
+
+        except Exception as e:
+            # If you later decide to add temperature for some models, keep this retry logic:
+            # retry when the API says temperature is unsupported for this model.
+            try:
+                body = getattr(e, "body", None) or {}
+                err = (body.get("error") or {}) if isinstance(body, dict) else {}
+                if err.get("param") == "temperature" and err.get("code") == "unsupported_value":
+                    logger.info("Model rejected temperature; retrying with default temperature.")
+                    kwargs.pop("temperature", None)
+                    response = client.chat.completions.create(**kwargs)
+                else:
+                    raise
+            except Exception:
+                logger.exception("OpenAI request failed")
+                return None
+
+        logger.debug("OpenAI raw response=%s", _json_dumps_safe(_openai_response_to_jsonable(response)))
+
+        try:
+            content = response.choices[0].message.content
+        except Exception:
+            logger.exception("Unexpected OpenAI response shape")
+            return None
+
+        logger.debug("OpenAI parsed content=%s", content)
+        try:
+            return json.loads(content)
         except json.JSONDecodeError:
+            logger.warning("LLM plan JSON parse failed; content=%s", content)
             return None
 
     def _heuristic_plan(self, question: str) -> Dict[str, Any]:
+        logger.info("Using heuristic planner")
         q = question.lower()
         if "advertise" in q:
             device = "aa:bb:cc:dd:ee:ff"
@@ -173,6 +363,8 @@ class DemoAnalyst:
 
     def execute_plan(self, plan: Dict[str, Any], question: str, plot_out: Optional[Path]) -> Dict[str, Any]:
         dataset = plan["dataset"]
+        logger.info("Executing plan dataset=%s plot_out=%s", dataset, str(plot_out) if plot_out else None)
+        logger.debug("Plan details=%s", _json_dumps_safe(plan))
         frame = self.tables[dataset].copy()
 
         for f in plan.get("filters", []):
@@ -186,6 +378,7 @@ class DemoAnalyst:
             "rows_after_filter": int(len(frame)),
             "question": question,
         }
+        logger.info("Rows after filter=%d", int(len(frame)))
 
         result_table = frame
         if plan.get("groupby"):
@@ -196,9 +389,12 @@ class DemoAnalyst:
                     agg["count"] = grouped.size()
             result_table = agg.reset_index().sort_values("count", ascending=False)
             facts["top_group"] = result_table.iloc[0].to_dict() if not result_table.empty else {}
+            if facts.get("top_group"):
+                logger.info("Top group=%s", _json_dumps_safe(facts["top_group"]))
 
         # Additional computed feature for timing-style questions.
         if "timing" in question.lower() or "distribution" in question.lower():
+            logger.info("Computing timing features inter_arrival_sec")
             timed = frame.sort_values("timestamp").copy()
             timed["inter_arrival_sec"] = timed["timestamp"].diff().dt.total_seconds()
             result_table = timed.dropna(subset=["inter_arrival_sec"])
@@ -206,8 +402,11 @@ class DemoAnalyst:
             facts["inter_arrival_p95"] = float(result_table["inter_arrival_sec"].quantile(0.95)) if not result_table.empty else None
 
         anomaly_report = self._anomaly_detect(plan.get("anomaly", {}), result_table)
+        logger.info("Anomalies detected=%d", len(anomaly_report))
+        logger.debug("Anomaly details=%s", _json_dumps_safe(anomaly_report))
 
         if plot_out:
+            logger.info("Writing plot=%s", str(plot_out))
             self._plot(plan.get("plot", {}), result_table, plot_out)
             facts["plot_path"] = str(plot_out)
 
@@ -219,6 +418,7 @@ class DemoAnalyst:
 
     def execute_python(self, question: str) -> Dict[str, Any]:
         """Safe, tiny code execution mode with prebuilt snippets (extendable)."""
+        logger.info("Executing python snippet mode")
         q = question.lower()
         if "advertise" in q:
             code = (
@@ -230,6 +430,7 @@ class DemoAnalyst:
                 "df = wifi_mgmt_frames[wifi_mgmt_frames['frame_subtype']=='probe_req'].copy()\n"
                 "result = df.groupby('receiver_mac').size().reset_index(name='count').sort_values('count', ascending=False)"
             )
+        logger.debug("Python snippet code=%s", code)
 
         local_vars = {
             "ble_adv_events": self.tables["ble_adv_events"],
@@ -278,6 +479,7 @@ class DemoAnalyst:
 
     @staticmethod
     def _plot(plot_cfg: Dict[str, Any], table: pd.DataFrame, out_path: Path) -> None:
+        logger.info("Plotting type=%s out_path=%s", plot_cfg.get("type"), str(out_path))
         plt.figure(figsize=(8, 4))
         plot_type = plot_cfg.get("type")
         if plot_type == "bar" and {plot_cfg.get("x"), plot_cfg.get("y")} <= set(table.columns):
@@ -336,11 +538,27 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--execution-mode", choices=["plan", "python"], default="plan")
     parser.add_argument("--model", default="gpt-4o-mini")
     parser.add_argument("--plot-out", default="usecase/llm_rag_ml/artifacts/latest_plot.png")
+    parser.add_argument("--log-level", default="info", help="Logging level: debug, info, warning, error, critical")
+    parser.add_argument(
+        "--log-to",
+        choices=sorted(LOG_TO_CHOICES),
+        default="stdout",
+        help="Where to write logs: stdout or file (default: stdout)",
+    )
+    parser.add_argument(
+        "--log-file",
+        nargs="?",
+        const="llm_guided_stat_analyst_demo.log",
+        default=None,
+        help="Log file path (used when --log-to file). If provided without a value, defaults to ./llm_guided_stat_analyst_demo.log",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+    configure_logging(args.log_level, log_to=args.log_to, log_file=args.log_file)
+    logger.info("CLI args=%s", _json_dumps_safe(vars(args)))
     analyst = DemoAnalyst(Path(args.data_dir))
     req = AnalysisRequest(
         question=args.question,
@@ -348,6 +566,7 @@ def main() -> None:
         execution_mode=args.execution_mode,
         model=args.model,
     )
+    logger.info("AnalysisRequest=%s", _json_dumps_safe(req.__dict__))
 
     if req.execution_mode == "python":
         output = analyst.execute_python(req.question)
@@ -355,6 +574,7 @@ def main() -> None:
     else:
         plan = analyst.generate_plan(req)
         output = analyst.execute_plan(plan=plan, question=req.question, plot_out=Path(args.plot_out))
+    logger.info("Run complete facts=%s", _json_dumps_safe(output.get("facts")))
 
     print("=== PLAN ===")
     print(json.dumps(plan, indent=2))
