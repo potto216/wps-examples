@@ -161,6 +161,9 @@ Each parquet row corresponds to one captured packet.
 python scripts/capture/wps_pcapng_to_parquet_cli.py "D:\captures" --recursive --skip-existing
 ```
 
+```bash
+python scripts/capture/wps_pcapng_to_parquet_cli.py ~/data/captures/ --recursive --skip-existing
+```
 ## Legacy Matter key updater: `matter/wps_matter_key_update_from_logr2.py`
 
 Legacy variant that uses inline defaults for WPS paths, device configuration, and capture settings.

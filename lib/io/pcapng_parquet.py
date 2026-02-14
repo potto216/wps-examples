@@ -20,7 +20,8 @@ except Exception:  # pragma: no cover - depends on scapy build
 @dataclass
 class PacketRow:
     packet_index: int
-    timestamp: float
+    timestamp: Optional[pd.Timestamp]
+    timestamp_unix_s: Optional[float]
     captured_length: int
     wire_length: int
     highest_layer: str
@@ -36,6 +37,7 @@ class PacketRow:
         return {
             "packet_index": self.packet_index,
             "timestamp": self.timestamp,
+            "timestamp_unix_s": self.timestamp_unix_s,
             "captured_length": self.captured_length,
             "wire_length": self.wire_length,
             "highest_layer": self.highest_layer,
@@ -58,9 +60,31 @@ class PcapngPacketDataFrameConverter:
     def to_dataframe(self) -> pd.DataFrame:
         packets = rdpcap(self.pcapng_path)
         rows = [self._packet_to_row(i, packet).to_dict() for i, packet in enumerate(packets)]
-        return pd.DataFrame(rows)
+        df = pd.DataFrame(rows)
+        if not df.empty and "timestamp" in df.columns:
+            df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
+        return df
 
     def _packet_to_row(self, packet_index: int, packet: Packet) -> PacketRow:
+        raw_time = getattr(packet, "time", None)
+        ts_unix_s: Optional[float]
+        if raw_time is None:
+            ts_unix_s = None
+        else:
+            try:
+                ts_unix_s = float(raw_time)
+            except Exception:
+                ts_unix_s = None
+
+        ts: Optional[pd.Timestamp]
+        if ts_unix_s is None:
+            ts = None
+        else:
+            # Match analysis/plot_bluetooth_gps_map.py: interpret scapy packet.time as seconds since Unix epoch.
+            ts = pd.to_datetime(ts_unix_s, unit="s", utc=True, errors="coerce")
+            if ts is pd.NaT or pd.isna(ts):
+                ts = None
+
         channel = None
         rssi = None
         if BTLE_PPI is not None and packet.haslayer(BTLE_PPI):
@@ -83,7 +107,8 @@ class PcapngPacketDataFrameConverter:
 
         return PacketRow(
             packet_index=packet_index,
-            timestamp=float(getattr(packet, "time", 0.0)),
+            timestamp=ts,
+            timestamp_unix_s=ts_unix_s,
             captured_length=len(bytes(packet)),
             wire_length=int(getattr(packet, "wirelen", len(bytes(packet)))),
             highest_layer=str(getattr(packet, "lastlayer", lambda: "unknown")()),

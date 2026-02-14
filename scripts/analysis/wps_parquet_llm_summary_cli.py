@@ -90,8 +90,9 @@ def _format_time(value: Any) -> Optional[str]:
     ts = pd.to_datetime(value, utc=True, errors="coerce")
     if pd.isna(ts):
         return None
-    return ts.to_pydatetime().astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
-
+    formatted_time = ts.to_pydatetime().astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    return formatted_time
+    
 
 def _numeric_summary(series: pd.Series) -> Dict[str, Any]:
     numeric = pd.to_numeric(series, errors="coerce").dropna()
