@@ -101,12 +101,27 @@ class DemoAnalyst:
                 "ble_adv_events": pd.read_parquet(ble_path),
                 "wifi_mgmt_frames": pd.read_parquet(wifi_path),
             }
-            for table in self.tables.values():
-                if "timestamp" in table.columns:
-                    table["timestamp"] = pd.to_datetime(table["timestamp"], utc=True, errors="coerce")
         else:
-            logger.info("Parquet tables missing; using built-in synthetic demo tables")
-            self.tables = self._demo_tables()
+            parquet_files = sorted(data_dir.glob("*.parquet"))
+            if parquet_files:
+                logger.info(
+                    "Named demo tables missing; loading %d parquet file(s) from data_dir",
+                    len(parquet_files),
+                )
+                # If a user points --data-dir at a capture export folder, it may contain a single
+                # one-row-per-packet parquet (e.g., produced by wps_pcapng_to_parquet_cli.py).
+                # Load all parquet files and use their stems as dataset names.
+                self.tables = {p.stem: pd.read_parquet(p) for p in parquet_files}
+                if len(self.tables) == 1:
+                    only_name = next(iter(self.tables.keys()))
+                    self.tables["pcap_packets"] = self.tables[only_name]
+            else:
+                logger.info("Parquet tables missing; using built-in synthetic demo tables")
+                self.tables = self._demo_tables()
+
+        for table in self.tables.values():
+            if "timestamp" in table.columns:
+                table["timestamp"] = pd.to_datetime(table["timestamp"], utc=True, errors="coerce")
 
         try:
             logger.info(
@@ -123,11 +138,29 @@ class DemoAnalyst:
                 self.metadata = json.load(handle)
         else:
             logger.info("Metadata missing; using synthetic metadata")
+
+            known_devices: List[str] = []
+            # Best-effort: infer "known devices" from common identifier columns.
+            for table in self.tables.values():
+                for col in ("advertiser_addr", "transmitter_mac", "receiver_mac", "src", "dst"):
+                    if col in table.columns:
+                        try:
+                            vals = (
+                                table[col]
+                                .dropna()
+                                .astype(str)
+                                .loc[lambda s: s.str.len() > 0]
+                                .unique()
+                                .tolist()
+                            )
+                            known_devices.extend(vals)
+                        except Exception:
+                            logger.debug("Could not infer devices from column=%s", col, exc_info=True)
+            known_devices = sorted(set(known_devices))[:50]
+
             self.metadata = {
                 "environment": "synthetic_demo",
-                "known_devices_present": sorted(
-                    set(self.tables["ble_adv_events"]["advertiser_addr"].tolist())
-                ),
+                "known_devices_present": known_devices,
                 "expected_anomaly_windows": [
                     {
                         "start": "2025-01-09T12:10:00Z",
@@ -138,6 +171,67 @@ class DemoAnalyst:
             }
 
         self.external_context = self._load_external_context(capture_summary_path, table_catalog_path)
+        # Always provide a minimal schema view of whatever tables we actually loaded so the LLM
+        # doesn't guess columns like "highest_layer" against the wrong dataset.
+        self.external_context.setdefault("loaded_tables", self._build_loaded_tables_context())
+
+    def _build_loaded_tables_context(self) -> Dict[str, Any]:
+        context: Dict[str, Any] = {}
+        for name, frame in self.tables.items():
+            columns = [
+                {"name": str(col), "dtype": str(frame[col].dtype)}
+                for col in list(frame.columns)[:50]
+            ]
+            time_range: Dict[str, Any] = {}
+            if "timestamp" in frame.columns:
+                parsed = pd.to_datetime(frame["timestamp"], utc=True, errors="coerce").dropna()
+                if not parsed.empty:
+                    time_range = {
+                        "start": parsed.min().isoformat().replace("+00:00", "Z"),
+                        "end": parsed.max().isoformat().replace("+00:00", "Z"),
+                    }
+            context[name] = {
+                "row_count": int(len(frame)),
+                "column_count": int(frame.shape[1]),
+                "columns": columns,
+                "time_range": time_range,
+            }
+        return context
+
+    def validate_plan(self, plan: Dict[str, Any]) -> List[str]:
+        errors: List[str] = []
+        dataset = plan.get("dataset")
+        if not isinstance(dataset, str) or dataset not in self.tables:
+            errors.append(
+                f"Unknown dataset '{dataset}'. Available datasets: {sorted(self.tables.keys())}"
+            )
+            return errors
+
+        frame = self.tables[dataset]
+        columns = set(str(c) for c in frame.columns)
+
+        for idx, filt in enumerate(plan.get("filters", []) or []):
+            if not isinstance(filt, dict):
+                errors.append(f"Filter #{idx} is not an object")
+                continue
+            col = filt.get("col")
+            op = filt.get("op")
+            if not isinstance(col, str) or col not in columns:
+                errors.append(f"Filter #{idx} references unknown column '{col}'")
+            if op not in {"==", "in", "contains", "!="}:
+                errors.append(f"Filter #{idx} has unsupported op '{op}'")
+
+        for idx, col in enumerate(plan.get("groupby", []) or []):
+            if not isinstance(col, str) or col not in columns:
+                errors.append(f"Groupby column #{idx} unknown '{col}'")
+
+        plot_cfg = plan.get("plot") or {}
+        if isinstance(plot_cfg, dict):
+            plot_type = plot_cfg.get("type")
+            if plot_type == "timeseries" and "timestamp" not in columns:
+                errors.append("Timeseries plot requested but dataset has no 'timestamp' column")
+
+        return errors
 
     @staticmethod
     def _load_external_context(capture_summary_path: Path, table_catalog_path: Path) -> Dict[str, Any]:
@@ -233,15 +327,29 @@ class DemoAnalyst:
     def generate_plan(self, request: AnalysisRequest) -> Dict[str, Any]:
         logger.info("Generating plan planner=%s model=%s", request.planner, request.model)
         if request.planner == "llm":
-            plan = self._llm_plan(request)
+            plan = self._llm_plan(request, validation_errors=None)
             if plan:
-                logger.info("LLM planner returned a plan")
-                logger.debug("LLM plan JSON=%s", _json_dumps_safe(plan))
-                return plan
-            logger.warning("LLM planner unavailable/failed; falling back to heuristic planner")
+                errors = self.validate_plan(plan)
+                if not errors:
+                    logger.info("LLM planner returned a valid plan")
+                    logger.debug("LLM plan JSON=%s", _json_dumps_safe(plan))
+                    return plan
+
+                logger.warning("LLM plan invalid; retrying once with structured errors")
+                logger.info("Plan validation errors: %s", "; ".join(errors))
+                repaired = self._llm_plan(request, validation_errors=errors)
+                if repaired:
+                    repaired_errors = self.validate_plan(repaired)
+                    if not repaired_errors:
+                        logger.info("LLM planner repaired plan successfully")
+                        logger.debug("LLM repaired plan JSON=%s", _json_dumps_safe(repaired))
+                        return repaired
+                    logger.warning("LLM repaired plan still invalid: %s", "; ".join(repaired_errors))
+
+            logger.warning("LLM planner unavailable/failed/invalid; falling back to heuristic planner")
         return self._heuristic_plan(request.question)
 
-    def _llm_plan(self, request: AnalysisRequest) -> Optional[Dict[str, Any]]:
+    def _llm_plan(self, request: AnalysisRequest, *, validation_errors: Optional[List[str]]) -> Optional[Dict[str, Any]]:
         api_key_set = bool(os.getenv("OPENAI_API_KEY"))
         if OpenAI is None or not api_key_set:
             logger.info(
@@ -251,9 +359,11 @@ class DemoAnalyst:
             )
             return None
 
+        available_datasets = sorted(self.tables.keys())
         prompt = (
-            "Return JSON only for analysis plan with keys: dataset, filters, groupby, metrics, "
-            "plot, anomaly. Datasets available: ble_adv_events and wifi_mgmt_frames. "
+            "Return JSON only for an analysis plan with keys: dataset, filters, groupby, metrics, plot, anomaly. "
+            "You MUST use only datasets and column names that exist in the provided table schema. "
+            f"Datasets available: {available_datasets}. "
             f"Question: {request.question}"
         )
 
@@ -264,6 +374,13 @@ class DemoAnalyst:
                 f"{json.dumps(self.external_context, indent=2, default=str)}"
             )
 
+        if validation_errors:
+            prompt += (
+                "\n\nYour previous plan failed validation with these errors. "
+                "Return a corrected plan that fixes them:\n"
+                + "\n".join(f"- {e}" for e in validation_errors)
+            )
+
         # Prefer `developer` message for instructions (replaces `system` for newer models).
         messages = [
             {"role": "developer", "content": "You are a wireless packet analytics planner."},
@@ -271,6 +388,7 @@ class DemoAnalyst:
         ]
 
         # Strict schema for the plan you expect.
+        # Note: enums are set from the actual loaded tables.
         plan_schema = {
             "name": "analysis_plan",
             "description": "Planner output for wireless packet analytics.",
@@ -280,7 +398,7 @@ class DemoAnalyst:
                 "additionalProperties": False,
                 "required": ["dataset", "filters", "groupby", "metrics", "plot", "anomaly"],
                 "properties": {
-                    "dataset": {"type": "string", "enum": ["ble_adv_events", "wifi_mgmt_frames"]},
+                    "dataset": {"type": "string", "enum": available_datasets},
 
                     "filters": {
                         "type": "array",
@@ -291,7 +409,14 @@ class DemoAnalyst:
                             "properties": {
                                 "col": {"type": "string"},
                                 "op": {"type": "string"},
-                                "value": {"type": "string"},
+                                "value": {
+                                    "anyOf": [
+                                        {"type": "string"},
+                                        {"type": "number"},
+                                        {"type": "boolean"},
+                                        {"type": "array", "items": {"type": "string"}},
+                                    ]
+                                },
                             },
                         },
                     },
@@ -387,6 +512,26 @@ class DemoAnalyst:
     def _heuristic_plan(self, question: str) -> Dict[str, Any]:
         logger.info("Using heuristic planner")
         q = question.lower()
+
+        if "bluetooth" in q and ("advertis" in q or "advertising" in q) and ("most" in q and "common" in q):
+            # Prefer packet-style parquet if the user pointed --data-dir at a single capture parquet.
+            packet_dataset = None
+            for name, frame in self.tables.items():
+                if {"highest_layer", "layers", "timestamp"} <= set(frame.columns):
+                    packet_dataset = name
+                    break
+            if packet_dataset is None:
+                packet_dataset = "ble_adv_events" if "ble_adv_events" in self.tables else next(iter(self.tables.keys()))
+
+            if packet_dataset in self.tables and "highest_layer" in self.tables[packet_dataset].columns:
+                return {
+                    "dataset": packet_dataset,
+                    "filters": [{"col": "layers", "op": "contains", "value": "BTLE_ADV"}],
+                    "groupby": ["highest_layer"],
+                    "metrics": [{"name": "count"}],
+                    "plot": {"type": "bar", "x": "highest_layer", "y": "count"},
+                    "anomaly": {"method": "robust_z", "on": "count", "threshold": 3.5},
+                }
         if "advertise" in q:
             device = "aa:bb:cc:dd:ee:ff"
             for token in question.replace("?", "").split():
@@ -429,10 +574,27 @@ class DemoAnalyst:
         frame = self.tables[dataset].copy()
 
         for f in plan.get("filters", []):
-            if f["op"] == "==":
-                frame = frame[frame[f["col"]] == f["value"]]
-            elif f["op"] == "in":
-                frame = frame[frame[f["col"]].isin(f["value"])]
+            col = f.get("col")
+            op = f.get("op")
+            value = f.get("value")
+            if col not in frame.columns:
+                raise ValueError(
+                    f"Plan references unknown column '{col}' for dataset '{dataset}'. "
+                    f"Available columns: {sorted(frame.columns.astype(str).tolist())}"
+                )
+
+            if op == "==":
+                frame = frame[frame[col] == value]
+            elif op == "in":
+                values = value
+                if isinstance(values, str) or not isinstance(values, list):
+                    values = [values]
+                frame = frame[frame[col].isin(values)]
+            elif op == "!=":
+                frame = frame[frame[col] != value]
+            elif op == "contains":
+                needle = "" if value is None else str(value)
+                frame = frame[frame[col].astype(str).str.contains(needle, na=False)]
 
         facts: Dict[str, Any] = {
             "dataset": dataset,
