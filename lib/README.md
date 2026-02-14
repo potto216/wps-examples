@@ -44,3 +44,8 @@ from lib.wps_common.analysis.packet_math import summarize_packets
 ```
 
 This avoids ambiguous generic module names and scales better as shared code grows.
+
+
+## Current shared modules
+
+- `lib/io/pcapng_parquet.py`: helpers/classes for converting `.pcapng` packet captures into packet-level pandas DataFrames and writing parquet outputs.

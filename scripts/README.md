@@ -7,6 +7,7 @@ This directory contains standalone scripts that automate common WPS workflows.
 * `capture/wps_capture_cli.py`: start a WPS capture and stop on keypress.
 * `capture/wps_cfa_to_cfax_cli.py`: convert `.cfa` captures to `.cfax`.
 * `capture/wps_cfax_to_pcapng_cli.py`: export `.cfax` captures to `.pcapng`.
+* `capture/wps_pcapng_to_parquet_cli.py`: convert `.pcapng` captures to packet-level parquet DataFrames.
 * `analysis/wps_pcapng_analyze_cli.py`: analyze a Bluetooth LE `.pcapng` file into JSON.
 * `matter/wps_matter_key_update_from_log.py`: parse Matter logs and update WPS keys during capture.
 * `matter/wps_matter_key_update_from_logr2.py`: legacy Matter key updater with inline defaults.
@@ -146,6 +147,17 @@ Export `.cfax` captures to `.pcapng` with optional technology filters.
 
 ```powershell
 python scripts/capture/wps_cfax_to_pcapng_cli.py "D:\captures" --recursive --skip-existing --technology-filter LE
+```
+
+## Convert PCAPNG to parquet: `capture/wps_pcapng_to_parquet_cli.py`
+
+Convert `.pcapng` captures into `.parquet` files using pandas with the `pyarrow` engine.
+Each parquet row corresponds to one captured packet.
+
+**Example**
+
+```powershell
+python scripts/capture/wps_pcapng_to_parquet_cli.py "D:\captures" --recursive --skip-existing
 ```
 
 ## Legacy Matter key updater: `matter/wps_matter_key_update_from_logr2.py`
