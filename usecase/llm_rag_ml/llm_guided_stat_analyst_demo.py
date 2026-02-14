@@ -88,19 +88,24 @@ class DemoAnalyst:
 
     def __init__(self, data_dir: Path) -> None:
         self.data_dir = data_dir
-        ble_path = data_dir / "ble_adv_events.csv"
-        wifi_path = data_dir / "wifi_mgmt_frames.csv"
+        ble_path = data_dir / "ble_adv_events.parquet"
+        wifi_path = data_dir / "wifi_mgmt_frames.parquet"
         metadata_path = data_dir / "metadata.json"
+        capture_summary_path = data_dir / "capture_summary.json"
+        table_catalog_path = data_dir / "table_catalog.json"
 
         logger.info("Initializing analyst data_dir=%s", str(data_dir))
         if ble_path.exists() and wifi_path.exists():
-            logger.info("Loading CSV tables ble=%s wifi=%s", str(ble_path), str(wifi_path))
+            logger.info("Loading Parquet tables ble=%s wifi=%s", str(ble_path), str(wifi_path))
             self.tables = {
-                "ble_adv_events": pd.read_csv(ble_path, parse_dates=["timestamp"]),
-                "wifi_mgmt_frames": pd.read_csv(wifi_path, parse_dates=["timestamp"]),
+                "ble_adv_events": pd.read_parquet(ble_path),
+                "wifi_mgmt_frames": pd.read_parquet(wifi_path),
             }
+            for table in self.tables.values():
+                if "timestamp" in table.columns:
+                    table["timestamp"] = pd.to_datetime(table["timestamp"], utc=True, errors="coerce")
         else:
-            logger.info("CSV tables missing; using built-in synthetic demo tables")
+            logger.info("Parquet tables missing; using built-in synthetic demo tables")
             self.tables = self._demo_tables()
 
         try:
@@ -131,6 +136,55 @@ class DemoAnalyst:
                     }
                 ],
             }
+
+        self.external_context = self._load_external_context(capture_summary_path, table_catalog_path)
+
+    @staticmethod
+    def _load_external_context(capture_summary_path: Path, table_catalog_path: Path) -> Dict[str, Any]:
+        context: Dict[str, Any] = {}
+
+        if capture_summary_path.exists():
+            with open(capture_summary_path, "r", encoding="utf-8") as handle:
+                capture_summary = json.load(handle)
+            context["capture_summary"] = {
+                "source_file": capture_summary.get("source_file"),
+                "table": capture_summary.get("table"),
+                "row_count": capture_summary.get("row_count"),
+                "column_count": capture_summary.get("column_count"),
+                "numeric_columns": capture_summary.get("numeric_columns", []),
+                "time_column": capture_summary.get("time_column"),
+                "time_range": capture_summary.get("time_range", {}),
+            }
+
+        if table_catalog_path.exists():
+            with open(table_catalog_path, "r", encoding="utf-8") as handle:
+                table_catalog = json.load(handle)
+            table_entries = table_catalog.get("tables", [])
+            if table_entries:
+                first_table = table_entries[0]
+                top_columns: List[Dict[str, Any]] = []
+                for col in first_table.get("columns", [])[:8]:
+                    top_columns.append(
+                        {
+                            "name": col.get("name"),
+                            "dtype": col.get("dtype"),
+                            "non_null_count": col.get("non_null_count"),
+                            "null_count": col.get("null_count"),
+                            "numeric_summary": col.get("numeric_summary"),
+                            "datetime_summary": col.get("datetime_summary"),
+                            "top_values": col.get("top_values", [])[:5],
+                        }
+                    )
+                context["table_catalog"] = {
+                    "table": first_table.get("table"),
+                    "source_file": first_table.get("source_file"),
+                    "row_count": first_table.get("row_count"),
+                    "time_range": first_table.get("time_range", {}),
+                    "columns": top_columns,
+                    "sample_rows": first_table.get("sample_rows", [])[:3],
+                }
+
+        return context
 
     @staticmethod
     def _demo_tables() -> Dict[str, pd.DataFrame]:
@@ -202,6 +256,13 @@ class DemoAnalyst:
             "plot, anomaly. Datasets available: ble_adv_events and wifi_mgmt_frames. "
             f"Question: {request.question}"
         )
+
+        if self.external_context:
+            prompt += (
+                "\n\nAdditional capture context from preprocessing summary files "
+                "(use when useful for filters/metrics/time windows):\n"
+                f"{json.dumps(self.external_context, indent=2, default=str)}"
+            )
 
         # Prefer `developer` message for instructions (replaces `system` for newer models).
         messages = [
@@ -542,7 +603,7 @@ def parse_args() -> argparse.Namespace:
         default="llm_guided_stat_analyst_demo.json",
         help="JSON configuration filename (default: llm_guided_stat_analyst_demo.json)",
     )
-    parser.add_argument("--data-dir", default=argparse.SUPPRESS, help="Directory with CSV tables + metadata")
+    parser.add_argument("--data-dir", default=argparse.SUPPRESS, help="Directory with Parquet tables + metadata")
     parser.add_argument("--question", default=argparse.SUPPRESS, help="Question in natural language")
     parser.add_argument("--planner", choices=["heuristic", "llm"], default=argparse.SUPPRESS)
     parser.add_argument("--execution-mode", choices=["plan", "python"], default=argparse.SUPPRESS)
