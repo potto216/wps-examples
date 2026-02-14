@@ -1,5 +1,13 @@
 # LLM-Guided Statistical Analyst Demo (BLE + Wi-Fi)
 
+Wireless packet captures are typically large. Putting raw capture data into an LLM context window is often impractical (or expensive). A better workflow is iterative: use the LLM to propose an analysis approach (queries, aggregations, plots), run it locally against the dataset, inspect the results, and then refine the approach.
+
+This demo explores a few trade-offs:
+
+- Should the system search directly for an answer, or generate a repeatable analysis plan?
+- Should the plan be expressed as structured operations (pandas-style steps) or as generated Python code?
+- How does an LLM-based planner compare to simple heuristics?
+
 This example provides a simplified but complete pipeline that can be extended in coursework:
 
 1. Load capture-derived tables as pandas DataFrames (`ble_adv_events`, `wifi_mgmt_frames`) plus optional `metadata.json`.
@@ -8,7 +16,7 @@ This example provides a simplified but complete pipeline that can be extended in
 4. Produce a concise narrative summary and an incident report when anomalies are detected.
 
 ## Setup
- To use a commerical LLM an API will need to be setup. For example for OpenAI the API key can be setup at https://platform.openai.com/settings/organization/api-keys. Then the key can be assigned to an environment variable to use.
+To use a commercial LLM, you’ll need an API key. For OpenAI, create a key at https://platform.openai.com/settings/organization/api-keys and set it as an environment variable (e.g., `OPENAI_API_KEY`).
 
 ## Files
 
@@ -18,7 +26,7 @@ This example provides a simplified but complete pipeline that can be extended in
 
 ## Run examples
 
-Examples of questions
+Example questions:
 ```bash
 python usecase/llm_rag_ml/llm_guided_stat_analyst_demo.py \
   --question "How often does device aa:bb:cc:dd:ee:ff advertise?"
@@ -32,7 +40,7 @@ python usecase/llm_rag_ml/llm_guided_stat_analyst_demo.py \
 
 Optional LLM plan generation:
 
-A generic example using OpenAI. 
+A generic example using OpenAI:
 ```bash
 export OPENAI_API_KEY=...
 python usecase/llm_rag_ml/llm_guided_stat_analyst_demo.py \
@@ -40,14 +48,19 @@ python usecase/llm_rag_ml/llm_guided_stat_analyst_demo.py \
   --question "Which AP had the most probe requests yesterday?"
 ```
 
-A more specific example with logging
-```
+A more specific example with logging:
+```bash
 export OPENAI_API_KEY=...
-python usecase/llm_rag_ml/llm_guided_stat_analyst_demo.py    \
---log-level debug \
---data-dir='/home/user/workspace/data' --planner='llm' --execution-mode='plan' --model='gpt-5-nano' --plot-out='/home/user workspace/output' \
---log-to file --log-file /home/user/workspace/output/llm_guided_stat_analyst_demo.log \
---question "How often does device aa:bb:cc:dd:ee:ff advertise?" 
-``
+python usecase/llm_rag_ml/llm_guided_stat_analyst_demo.py \
+  --log-level debug \
+  --data-dir "/home/user/workspace/data" \
+  --planner "llm" \
+  --execution-mode "plan" \
+  --model "gpt-5-nano" \
+  --plot-out "/home/user/workspace/output" \
+  --log-to file \
+  --log-file "/home/user/workspace/output/llm_guided_stat_analyst_demo.log" \
+  --question "How often does device aa:bb:cc:dd:ee:ff advertise?"
+```
 
 The script writes a default plot artifact to `usecase/llm_rag_ml/artifacts/latest_plot.png`.
