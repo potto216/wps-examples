@@ -68,6 +68,23 @@ class TestParquetLlmSummaryCli(unittest.TestCase):
             self.assertTrue((out_dir / "capture_summary.json").exists())
             self.assertTrue((out_dir / "table_catalog.json").exists())
 
+    def test_human_summary_includes_object_composition(self):
+        frame = pd.DataFrame(
+            {
+                "timestamp": ["2025-01-01T00:00:00Z", "2025-01-01T00:00:01Z"],
+                "payload": [{"a": 1, "b": 2}, {"a": 3}],
+                "tags": [["x", "y"], ["z"]],
+            }
+        )
+
+        payloads = self.module.build_summary_payloads(
+            frame, table_name="test", source_path="sample.parquet"
+        )
+        text = self.module._human_readable(payloads["capture_summary"], payloads["table_catalog"])
+        self.assertIn("object composition", text)
+        self.assertIn("dict keys", text)
+        self.assertIn("element types", text)
+
 
 if __name__ == "__main__":
     unittest.main()

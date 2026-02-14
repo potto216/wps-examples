@@ -15,6 +15,7 @@ import pandas as pd
 TIME_COLUMN_CANDIDATES = ("ts", "timestamp", "time", "datetime")
 TOP_N = 10
 SAMPLE_ROWS = 5
+OBJECT_SAMPLE_SIZE = 200
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -128,6 +129,81 @@ def _top_values(series: pd.Series, top_n: int = TOP_N) -> List[Dict[str, Any]]:
     ]
 
 
+def _object_composition(series: pd.Series, *, sample_size: int = OBJECT_SAMPLE_SIZE) -> Optional[Dict[str, Any]]:
+    """Summarize what an object-dtype column actually contains.
+
+    We keep this intentionally lightweight and bounded: only inspect a small sample of non-null
+    values to avoid expensive scans on large tables.
+    """
+
+    non_na = series.dropna()
+    if non_na.empty:
+        return None
+
+    sample = non_na.head(sample_size)
+    total = int(sample.shape[0])
+    if total <= 0:
+        return None
+
+    def _type_name(value: Any) -> str:
+        try:
+            return type(value).__name__
+        except Exception:
+            return "unknown"
+
+    type_counts = sample.map(_type_name).value_counts()
+    types = [
+        {
+            "type": str(type_name),
+            "count": int(count),
+            "ratio": round(float(count) / float(total), 3),
+        }
+        for type_name, count in type_counts.items()
+    ]
+
+    # Optional deeper inspection for common container-like objects.
+    dict_keys: List[str] = []
+    elem_types: List[str] = []
+
+    # Dict keys (union across sample, capped).
+    keys_set: set[str] = set()
+    for value in sample:
+        if isinstance(value, dict):
+            for k in value.keys():
+                keys_set.add(str(k))
+                if len(keys_set) >= 25:
+                    break
+        if len(keys_set) >= 25:
+            break
+    if keys_set:
+        dict_keys = sorted(keys_set)
+
+    # Element types for list/tuple/set (bounded).
+    elem_type_set: set[str] = set()
+    inspected_elems = 0
+    for value in sample:
+        if isinstance(value, (list, tuple, set)):
+            for elem in value:
+                elem_type_set.add(_type_name(elem))
+                inspected_elems += 1
+                if inspected_elems >= 200 or len(elem_type_set) >= 10:
+                    break
+        if inspected_elems >= 200 or len(elem_type_set) >= 10:
+            break
+    if elem_type_set:
+        elem_types = sorted(elem_type_set)
+
+    payload: Dict[str, Any] = {
+        "sampled_non_null": total,
+        "types": types,
+    }
+    if dict_keys:
+        payload["dict_keys"] = dict_keys
+    if elem_types:
+        payload["element_types"] = elem_types
+    return payload
+
+
 def _column_catalog(frame: pd.DataFrame) -> List[Dict[str, Any]]:
     row_count = max(int(frame.shape[0]), 1)
     catalog: List[Dict[str, Any]] = []
@@ -152,6 +228,9 @@ def _column_catalog(frame: pd.DataFrame) -> List[Dict[str, Any]]:
                 "min": _format_time(non_na.min() if not non_na.empty else None),
                 "max": _format_time(non_na.max() if not non_na.empty else None),
             }
+        elif pd.api.types.is_object_dtype(series):
+            entry["object_summary"] = _object_composition(series)
+            entry["top_values"] = _top_values(series)
         else:
             entry["top_values"] = _top_values(series)
         catalog.append(entry)
@@ -245,6 +324,30 @@ def _human_readable(summary: Dict[str, Any], catalog: Dict[str, Any]) -> str:
         lines.append(
             f"  - {column['name']} ({column['dtype']}), non-null={column['non_null_count']}, unique={column['unique_count']}"
         )
+        obj_summary = column.get("object_summary")
+        if isinstance(obj_summary, dict) and obj_summary.get("types"):
+            type_bits = []
+            for item in obj_summary["types"][:4]:
+                t = item.get("type")
+                ratio = item.get("ratio")
+                if t is None:
+                    continue
+                if ratio is None:
+                    type_bits.append(str(t))
+                else:
+                    type_bits.append(f"{t} ({ratio:.3f})")
+            if type_bits:
+                lines.append(f"      object composition: {', '.join(type_bits)}")
+
+            dict_keys = obj_summary.get("dict_keys")
+            if isinstance(dict_keys, list) and dict_keys:
+                preview = ", ".join(str(k) for k in dict_keys[:12])
+                suffix = "" if len(dict_keys) <= 12 else " ..."
+                lines.append(f"      dict keys (sampled): {preview}{suffix}")
+
+            elem_types = obj_summary.get("element_types")
+            if isinstance(elem_types, list) and elem_types:
+                lines.append(f"      element types (sampled): {', '.join(str(t) for t in elem_types)}")
     return "\n".join(lines)
 
 
