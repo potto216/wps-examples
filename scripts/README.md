@@ -9,6 +9,7 @@ This directory contains standalone scripts that automate common WPS workflows.
 * `capture/wps_cfax_to_pcapng_cli.py`: export `.cfax` captures to `.pcapng`.
 * `capture/wps_pcapng_to_parquet_cli.py`: convert `.pcapng` captures to packet-level parquet DataFrames.
 * `analysis/wps_pcapng_analyze_cli.py`: analyze a Bluetooth LE `.pcapng` file into JSON.
+* `analysis/wps_parquet_llm_summary_cli.py`: generate LLM-friendly capture summary and table catalog JSON from a parquet file.
 * `matter/wps_matter_key_update_from_log.py`: parse Matter logs and update WPS keys during capture.
 * `matter/wps_matter_key_update_from_logr2.py`: legacy Matter key updater with inline defaults.
 
@@ -177,3 +178,15 @@ Analyze a Bluetooth LE `.pcapng` file using Scapy and emit a JSON report.
 ```powershell
 python scripts/analysis/wps_pcapng_analyze_cli.py "D:\path\capture.pcapng" -o report.json
 ```
+
+## Parquet LLM summary: `analysis/wps_parquet_llm_summary_cli.py`
+
+Build `CaptureSummary` and `TableCatalog` style artifacts from one parquet file, as described in the LLM-guided analyst design.
+
+**Example**
+
+```bash
+python scripts/analysis/wps_parquet_llm_summary_cli.py data/sample.parquet --output-dir out/llm_summary
+```
+
+Use `--no-human-readable` to suppress stdout output, and omit `--output-dir` if you only want the terminal summary.
