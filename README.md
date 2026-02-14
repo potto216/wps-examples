@@ -35,6 +35,11 @@ Standalone automation scripts are available under `scripts/`:
 
 See `scripts/README.md` for details and usage examples.
 
+## Shared Python code (`lib/`)
+
+The repository-level `lib/` directory is the home for shared Python helpers used by scripts and notebooks.
+See [`lib/README.md`](lib/README.md) for naming, layout, and dependency-management recommendations.
+
 # Setup
 ## Python
 
