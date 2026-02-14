@@ -231,6 +231,43 @@ class DemoAnalyst:
             if plot_type == "timeseries" and "timestamp" not in columns:
                 errors.append("Timeseries plot requested but dataset has no 'timestamp' column")
 
+        # Enforce metrics rules when grouping (prevents KeyError: 'count' later).
+        groupby_cols = plan.get("groupby") or []
+        metrics = plan.get("metrics") or []
+
+        if groupby_cols:
+            if not isinstance(metrics, list) or len(metrics) == 0:
+                errors.append(
+                    "Plan uses 'groupby' but 'metrics' is empty. "
+                    "Include at least: metrics: [{\"name\": \"count\"}]"
+                )
+            else:
+                metric_names: List[str] = []
+                for m in metrics:
+                    if not isinstance(m, dict):
+                        errors.append("Each entry in 'metrics' must be an object like {\"name\": \"count\"}.")
+                        continue
+                    name = str(m.get("name", "")).strip().lower()
+                    if not name:
+                        errors.append("Metric is missing required field 'name'.")
+                        continue
+                    metric_names.append(name)
+
+                # This demo executor currently only supports 'count' for grouped results.
+                supported_metrics = {"count"}
+                unsupported = sorted({n for n in metric_names if n and n not in supported_metrics})
+                if unsupported:
+                    errors.append(
+                        f"Unsupported metric(s) for grouped analysis: {unsupported}. "
+                        f"Supported metrics: {sorted(supported_metrics)}"
+                    )
+
+                if "count" not in metric_names:
+                    errors.append(
+                        "Plan uses 'groupby' but does not include metric 'count'. "
+                        "Add: metrics: [{\"name\": \"count\"}]"
+                    )
+
         return errors
 
     @staticmethod
@@ -860,7 +897,7 @@ def parse_args() -> argparse.Namespace:
         "data_dir": "usecase/llm_rag_ml/data",
         "planner": "heuristic",
         "execution_mode": "plan",
-        "model": "gpt-4o-mini",
+        "model": "gpt-5-nano",
         "output_dir": "usecase/llm_rag_ml/artifacts",
         "skip_plot_generation": False,
         "log_level": "info",
