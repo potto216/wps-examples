@@ -573,7 +573,9 @@ class DemoAnalyst:
         logger.debug("Plan details=%s", _json_dumps_safe(plan))
         frame = self.tables[dataset].copy()
 
-        for f in plan.get("filters", []):
+        filters = plan.get("filters", [])
+        logger.info("Applying %d filter(s)", len(filters))
+        for f in filters:
             col = f.get("col")
             op = f.get("op")
             value = f.get("value")
@@ -604,8 +606,10 @@ class DemoAnalyst:
         logger.info("Rows after filter=%d", int(len(frame)))
 
         result_table = frame
-        if plan.get("groupby"):
-            grouped = frame.groupby(plan["groupby"], dropna=False)
+        groupby_cols = plan.get("groupby") or []
+        if groupby_cols:
+            logger.info("Computing grouped metrics groupby=%s metrics=%s", groupby_cols, plan.get("metrics", []))
+            grouped = frame.groupby(groupby_cols, dropna=False)
             agg = pd.DataFrame(index=grouped.size().index)
             for metric in plan.get("metrics", []):
                 if metric["name"] == "count":
@@ -753,6 +757,60 @@ def build_incident_report(question: str, facts: Dict[str, Any], anomalies: List[
     )
 
 
+def build_llm_report(
+    *,
+    question: str,
+    plan: Dict[str, Any],
+    facts: Dict[str, Any],
+    anomalies: List[Dict[str, Any]],
+    model: str,
+) -> Optional[str]:
+    api_key_set = bool(os.getenv("OPENAI_API_KEY"))
+    if OpenAI is None or not api_key_set:
+        logger.info(
+            "Skipping LLM report generation openai_imported=%s OPENAI_API_KEY_set=%s",
+            OpenAI is not None,
+            api_key_set,
+        )
+        return None
+
+    logger.info("Sending execution results to LLM for report model=%s", model)
+    payload = {
+        "question": question,
+        "plan": plan,
+        "facts": facts,
+        "anomalies": anomalies,
+    }
+    messages = [
+        {
+            "role": "developer",
+            "content": (
+                "You are a wireless analytics assistant. "
+                "Write a concise report with sections: Summary, Key Findings, and Anomaly Assessment."
+            ),
+        },
+        {
+            "role": "user",
+            "content": f"Create a human-readable report from this analysis output:\n{json.dumps(payload, indent=2, default=str)}",
+        },
+    ]
+
+    try:
+        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        response = client.chat.completions.create(
+            model=model,
+            messages=messages,
+            reasoning_effort="minimal",
+        )
+        logger.debug("LLM report raw response=%s", _json_dumps_safe(_openai_response_to_jsonable(response)))
+        content = response.choices[0].message.content
+        logger.info("Received human-readable report from LLM")
+        return str(content).strip()
+    except Exception:
+        logger.exception("LLM report generation failed; falling back to local summary")
+        return None
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="LLM-guided statistical analyst demo for BLE/Wi-Fi tables")
     parser.add_argument(
@@ -770,6 +828,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--planner", choices=["heuristic", "llm"], default=argparse.SUPPRESS)
     parser.add_argument("--execution-mode", choices=["plan", "python"], default=argparse.SUPPRESS)
     parser.add_argument("--model", default=argparse.SUPPRESS)
+    parser.add_argument(
+        "--skip-plot-generation",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="Skip writing plot files even if the plan includes a plot config",
+    )
     parser.add_argument(
         "--output-dir",
         default=argparse.SUPPRESS,
@@ -798,6 +862,7 @@ def parse_args() -> argparse.Namespace:
         "execution_mode": "plan",
         "model": "gpt-4o-mini",
         "output_dir": "usecase/llm_rag_ml/artifacts",
+        "skip_plot_generation": False,
         "log_level": "info",
         "log_to": "stdout",
         "log_file": None,
@@ -827,10 +892,27 @@ def parse_args() -> argparse.Namespace:
     return argparse.Namespace(**merged)
 
 
-def write_reports(output_dir: Path, *, plan: Dict[str, Any], output: Dict[str, Any], question: str) -> Dict[str, str]:
+def write_reports(
+    output_dir: Path,
+    *,
+    plan: Dict[str, Any],
+    output: Dict[str, Any],
+    question: str,
+    llm_model: str,
+) -> Dict[str, str]:
     output_dir.mkdir(parents=True, exist_ok=True)
+    logger.info("Preparing report artifacts")
     summary = build_narrative(output["facts"], output["anomalies"])
     incident_report = build_incident_report(question, output["facts"], output["anomalies"])
+    llm_summary = build_llm_report(
+        question=question,
+        plan=plan,
+        facts=output["facts"],
+        anomalies=output["anomalies"],
+        model=llm_model,
+    )
+    if llm_summary:
+        summary = llm_summary
     table_preview = output["table"].head(10).to_string(index=False)
 
     artifacts = {
@@ -868,10 +950,21 @@ def main() -> None:
         plan: Dict[str, Any] = {"execution_mode": "python"}
     else:
         plan = analyst.generate_plan(req)
-        plot_out = Path(args.output_dir) / "plot.png"
+        has_plot = bool(plan.get("plot"))
+        if args.skip_plot_generation and has_plot:
+            logger.info("Skipping plot generation by configuration despite plot in plan")
+        elif not has_plot:
+            logger.info("Plan has no plot config; skipping plot generation")
+        plot_out = (Path(args.output_dir) / "plot.png") if (has_plot and not args.skip_plot_generation) else None
         output = analyst.execute_plan(plan=plan, question=req.question, plot_out=plot_out)
     logger.info("Run complete facts=%s", _json_dumps_safe(output.get("facts")))
-    artifacts = write_reports(Path(args.output_dir), plan=plan, output=output, question=req.question)
+    artifacts = write_reports(
+        Path(args.output_dir),
+        plan=plan,
+        output=output,
+        question=req.question,
+        llm_model=req.model,
+    )
     logger.info("Artifacts written=%s", _json_dumps_safe(artifacts))
 
     print("=== PLAN ===")
