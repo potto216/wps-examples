@@ -532,27 +532,99 @@ def build_incident_report(question: str, facts: Dict[str, Any], anomalies: List[
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="LLM-guided statistical analyst demo for BLE/Wi-Fi tables")
-    parser.add_argument("--data-dir", default="usecase/llm_rag_ml/data", help="Directory with CSV tables + metadata")
-    parser.add_argument("--question", required=True, help="Question in natural language")
-    parser.add_argument("--planner", choices=["heuristic", "llm"], default="heuristic")
-    parser.add_argument("--execution-mode", choices=["plan", "python"], default="plan")
-    parser.add_argument("--model", default="gpt-4o-mini")
-    parser.add_argument("--plot-out", default="usecase/llm_rag_ml/artifacts/latest_plot.png")
-    parser.add_argument("--log-level", default="info", help="Logging level: debug, info, warning, error, critical")
+    parser.add_argument(
+        "--config-dir",
+        default=".",
+        help="Directory containing JSON config file (default: current directory)",
+    )
+    parser.add_argument(
+        "--config-file",
+        default="llm_guided_stat_analyst_demo.json",
+        help="JSON configuration filename (default: llm_guided_stat_analyst_demo.json)",
+    )
+    parser.add_argument("--data-dir", default=argparse.SUPPRESS, help="Directory with CSV tables + metadata")
+    parser.add_argument("--question", default=argparse.SUPPRESS, help="Question in natural language")
+    parser.add_argument("--planner", choices=["heuristic", "llm"], default=argparse.SUPPRESS)
+    parser.add_argument("--execution-mode", choices=["plan", "python"], default=argparse.SUPPRESS)
+    parser.add_argument("--model", default=argparse.SUPPRESS)
+    parser.add_argument(
+        "--output-dir",
+        default=argparse.SUPPRESS,
+        help="Directory to write plots and report artifacts",
+    )
+    parser.add_argument("--log-level", default=argparse.SUPPRESS, help="Logging level: debug, info, warning, error, critical")
     parser.add_argument(
         "--log-to",
         choices=sorted(LOG_TO_CHOICES),
-        default="stdout",
+        default=argparse.SUPPRESS,
         help="Where to write logs: stdout or file (default: stdout)",
     )
     parser.add_argument(
         "--log-file",
         nargs="?",
         const="llm_guided_stat_analyst_demo.log",
-        default=None,
+        default=argparse.SUPPRESS,
         help="Log file path (used when --log-to file). If provided without a value, defaults to ./llm_guided_stat_analyst_demo.log",
     )
-    return parser.parse_args()
+
+    args = parser.parse_args()
+    config_path = Path(args.config_dir) / args.config_file
+    defaults: Dict[str, Any] = {
+        "data_dir": "usecase/llm_rag_ml/data",
+        "planner": "heuristic",
+        "execution_mode": "plan",
+        "model": "gpt-4o-mini",
+        "output_dir": "usecase/llm_rag_ml/artifacts",
+        "log_level": "info",
+        "log_to": "stdout",
+        "log_file": None,
+    }
+
+    config_values: Dict[str, Any] = {}
+    if config_path.exists():
+        with open(config_path, "r", encoding="utf-8") as handle:
+            loaded = json.load(handle)
+        if not isinstance(loaded, dict):
+            raise ValueError(f"Config file must contain a JSON object: {config_path}")
+        config_values = loaded
+
+    merged = defaults.copy()
+    merged.update({k: v for k, v in config_values.items() if k in defaults or k == "question"})
+    cli_overrides = vars(args).copy()
+    cli_overrides.pop("config_dir", None)
+    cli_overrides.pop("config_file", None)
+    merged.update(cli_overrides)
+    merged["config_dir"] = args.config_dir
+    merged["config_file"] = args.config_file
+    merged["config_path"] = str(config_path)
+
+    if not merged.get("question"):
+        parser.error("A question must be provided via --question or in the JSON config file under key 'question'.")
+
+    return argparse.Namespace(**merged)
+
+
+def write_reports(output_dir: Path, *, plan: Dict[str, Any], output: Dict[str, Any], question: str) -> Dict[str, str]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    summary = build_narrative(output["facts"], output["anomalies"])
+    incident_report = build_incident_report(question, output["facts"], output["anomalies"])
+    table_preview = output["table"].head(10).to_string(index=False)
+
+    artifacts = {
+        "plan": output_dir / "plan.json",
+        "facts": output_dir / "facts.json",
+        "anomalies": output_dir / "anomalies.json",
+        "summary": output_dir / "summary.txt",
+        "incident_report": output_dir / "incident_report.md",
+        "result_preview": output_dir / "result_preview.txt",
+    }
+    artifacts["plan"].write_text(json.dumps(plan, indent=2, default=str), encoding="utf-8")
+    artifacts["facts"].write_text(json.dumps(output["facts"], indent=2, default=str), encoding="utf-8")
+    artifacts["anomalies"].write_text(json.dumps(output["anomalies"], indent=2, default=str), encoding="utf-8")
+    artifacts["summary"].write_text(summary + "\n", encoding="utf-8")
+    artifacts["incident_report"].write_text(incident_report + "\n", encoding="utf-8")
+    artifacts["result_preview"].write_text(table_preview + "\n", encoding="utf-8")
+    return {name: str(path) for name, path in artifacts.items()}
 
 
 def main() -> None:
@@ -573,8 +645,11 @@ def main() -> None:
         plan: Dict[str, Any] = {"execution_mode": "python"}
     else:
         plan = analyst.generate_plan(req)
-        output = analyst.execute_plan(plan=plan, question=req.question, plot_out=Path(args.plot_out))
+        plot_out = Path(args.output_dir) / "plot.png"
+        output = analyst.execute_plan(plan=plan, question=req.question, plot_out=plot_out)
     logger.info("Run complete facts=%s", _json_dumps_safe(output.get("facts")))
+    artifacts = write_reports(Path(args.output_dir), plan=plan, output=output, question=req.question)
+    logger.info("Artifacts written=%s", _json_dumps_safe(artifacts))
 
     print("=== PLAN ===")
     print(json.dumps(plan, indent=2))
@@ -586,6 +661,8 @@ def main() -> None:
     print(build_incident_report(req.question, output["facts"], output["anomalies"]))
     print("\n=== RESULT PREVIEW ===")
     print(output["table"].head(10).to_string(index=False))
+    print("\n=== ARTIFACTS ===")
+    print(json.dumps(artifacts, indent=2))
 
 
 if __name__ == "__main__":
