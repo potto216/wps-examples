@@ -10,6 +10,7 @@ jupyterlab
 numpy
 matplotlib
 pandas
+pyarrow
 openai
 opencv-python
 scikit-image
