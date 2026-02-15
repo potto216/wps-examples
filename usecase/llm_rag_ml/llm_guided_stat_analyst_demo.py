@@ -75,12 +75,32 @@ def _json_dumps_safe(obj: Any) -> str:
         return str(obj)
 
 
+def _redact_secrets(obj: Any) -> Any:
+    """Best-effort redaction for logs (avoid leaking API keys)."""
+
+    sensitive = {"openai_api_key", "api_key", "openai_key", "openaiapikey", "openai_api_token"}
+
+    if isinstance(obj, dict):
+        redacted: Dict[Any, Any] = {}
+        for key, value in obj.items():
+            key_str = str(key)
+            if key_str in {"OPENAI_API_KEY"} or key_str.lower().replace("-", "_") in sensitive:
+                redacted[key] = "***REDACTED***"
+            else:
+                redacted[key] = _redact_secrets(value)
+        return redacted
+    if isinstance(obj, list):
+        return [_redact_secrets(v) for v in obj]
+    return obj
+
+
 @dataclass
 class AnalysisRequest:
     question: str
     planner: str
     execution_mode: str
     model: str
+    dataset: Optional[str] = None
 
 
 class DemoAnalyst:
@@ -218,8 +238,21 @@ class DemoAnalyst:
             op = filt.get("op")
             if not isinstance(col, str) or col not in columns:
                 errors.append(f"Filter #{idx} references unknown column '{col}'")
-            if op not in {"==", "in", "contains", "!="}:
+            if op not in {"==", "in", "contains", "!=", "between"}:
                 errors.append(f"Filter #{idx} has unsupported op '{op}'")
+                continue
+
+            if op == "between":
+                value = filt.get("value")
+                if not isinstance(value, list) or len(value) != 2:
+                    errors.append(
+                        f"Filter #{idx} op 'between' requires value as a 2-item array like [lower, upper]"
+                    )
+                else:
+                    if any(v is None or (isinstance(v, str) and not v.strip()) for v in value):
+                        errors.append(
+                            f"Filter #{idx} op 'between' has empty bounds; provide both lower and upper"
+                        )
 
         for idx, col in enumerate(plan.get("groupby", []) or []):
             if not isinstance(col, str) or col not in columns:
@@ -363,6 +396,17 @@ class DemoAnalyst:
 
     def generate_plan(self, request: AnalysisRequest) -> Dict[str, Any]:
         logger.info("Generating plan planner=%s model=%s", request.planner, request.model)
+
+        if request.dataset:
+            if request.dataset not in self.tables:
+                logger.warning(
+                    "Requested dataset override not found dataset=%s available=%s",
+                    request.dataset,
+                    sorted(self.tables.keys()),
+                )
+            else:
+                logger.info("Using dataset override=%s", request.dataset)
+
         if request.planner == "llm":
             plan = self._llm_plan(request, validation_errors=None)
             if plan:
@@ -397,12 +441,21 @@ class DemoAnalyst:
             return None
 
         available_datasets = sorted(self.tables.keys())
+        allowed_datasets = available_datasets
+        if request.dataset and request.dataset in self.tables:
+            allowed_datasets = [request.dataset]
+
         prompt = (
             "Return JSON only for an analysis plan with keys: dataset, filters, groupby, metrics, plot, anomaly. "
             "You MUST use only datasets and column names that exist in the provided table schema. "
+            "Filter operators must be one of: ==, !=, in, contains, between. "
+            "For op 'between', set value to a 2-item array like [lower, upper] (numbers or timestamps). "
             f"Datasets available: {available_datasets}. "
             f"Question: {request.question}"
         )
+
+        if request.dataset:
+            prompt += f"\nYou MUST use dataset: {request.dataset}"
 
         if self.external_context:
             prompt += (
@@ -435,7 +488,7 @@ class DemoAnalyst:
                 "additionalProperties": False,
                 "required": ["dataset", "filters", "groupby", "metrics", "plot", "anomaly"],
                 "properties": {
-                    "dataset": {"type": "string", "enum": available_datasets},
+                    "dataset": {"type": "string", "enum": allowed_datasets},
 
                     "filters": {
                         "type": "array",
@@ -445,13 +498,19 @@ class DemoAnalyst:
                             "required": ["col", "op", "value"],
                             "properties": {
                                 "col": {"type": "string"},
-                                "op": {"type": "string"},
+                                "op": {
+                                    "type": "string",
+                                    "enum": ["==", "!=", "in", "contains", "between"],
+                                },
                                 "value": {
                                     "anyOf": [
                                         {"type": "string"},
                                         {"type": "number"},
                                         {"type": "boolean"},
-                                        {"type": "array", "items": {"type": "string"}},
+                                        {
+                                            "type": "array",
+                                            "items": {"anyOf": [{"type": "string"}, {"type": "number"}]},
+                                        },
                                     ]
                                 },
                             },
@@ -634,6 +693,33 @@ class DemoAnalyst:
             elif op == "contains":
                 needle = "" if value is None else str(value)
                 frame = frame[frame[col].astype(str).str.contains(needle, na=False)]
+            elif op == "between":
+                if not isinstance(value, list) or len(value) != 2:
+                    raise ValueError(
+                        f"Filter op 'between' requires a 2-item array value for col '{col}', got {value!r}"
+                    )
+                lower, upper = value
+
+                series = frame[col]
+                is_datetime = pd.api.types.is_datetime64_any_dtype(series)
+
+                if is_datetime:
+                    lo_dt = pd.to_datetime(lower, utc=True, errors="coerce")
+                    hi_dt = pd.to_datetime(upper, utc=True, errors="coerce")
+                    if pd.isna(lo_dt) or pd.isna(hi_dt):
+                        raise ValueError(
+                            f"Could not parse datetime bounds for 'between' filter on '{col}': {value!r}"
+                        )
+                    frame = frame[(frame[col] >= lo_dt) & (frame[col] <= hi_dt)]
+                else:
+                    try:
+                        lo_num = float(lower)
+                        hi_num = float(upper)
+                    except Exception as e:
+                        raise ValueError(
+                            f"Could not parse numeric bounds for 'between' filter on '{col}': {value!r}"
+                        ) from e
+                    frame = frame[(frame[col].astype(float) >= lo_num) & (frame[col].astype(float) <= hi_num)]
 
         facts: Dict[str, Any] = {
             "dataset": dataset,
@@ -862,6 +948,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--data-dir", default=argparse.SUPPRESS, help="Directory with Parquet tables + metadata")
     parser.add_argument("--question", default=argparse.SUPPRESS, help="Question in natural language")
+    parser.add_argument(
+        "--dataset",
+        default=argparse.SUPPRESS,
+        help="Force dataset name to analyze (overrides planner dataset selection)",
+    )
     parser.add_argument("--planner", choices=["heuristic", "llm"], default=argparse.SUPPRESS)
     parser.add_argument("--execution-mode", choices=["plan", "python"], default=argparse.SUPPRESS)
     parser.add_argument("--model", default=argparse.SUPPRESS)
@@ -898,6 +989,8 @@ def parse_args() -> argparse.Namespace:
         "planner": "heuristic",
         "execution_mode": "plan",
         "model": "gpt-5-nano",
+        "dataset": None,
+        "openai_api_key": None,
         "output_dir": "usecase/llm_rag_ml/artifacts",
         "skip_plot_generation": False,
         "log_level": "info",
@@ -972,13 +1065,24 @@ def write_reports(
 def main() -> None:
     args = parse_args()
     configure_logging(args.log_level, log_to=args.log_to, log_file=args.log_file)
-    logger.info("CLI args=%s", _json_dumps_safe(vars(args)))
+
+    # Optionally allow OPENAI_API_KEY to be provided via config.
+    config_key = getattr(args, "openai_api_key", None)
+    if config_key:
+        if os.getenv("OPENAI_API_KEY"):
+            logger.info("OPENAI_API_KEY already set in environment; ignoring config value")
+        else:
+            os.environ["OPENAI_API_KEY"] = str(config_key)
+            logger.info("OPENAI_API_KEY set from JSON config")
+
+    logger.info("CLI args=%s", _json_dumps_safe(_redact_secrets(vars(args))))
     analyst = DemoAnalyst(Path(args.data_dir))
     req = AnalysisRequest(
         question=args.question,
         planner=args.planner,
         execution_mode=args.execution_mode,
         model=args.model,
+        dataset=getattr(args, "dataset", None),
     )
     logger.info("AnalysisRequest=%s", _json_dumps_safe(req.__dict__))
 
