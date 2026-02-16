@@ -108,47 +108,28 @@ class DemoAnalyst:
 
     def __init__(self, data_dir: Path) -> None:
         self.data_dir = data_dir
-        ble_path = data_dir / "ble_adv_events.parquet"
-        wifi_path = data_dir / "wifi_mgmt_frames.parquet"
         metadata_path = data_dir / "metadata.json"
         capture_summary_path = data_dir / "capture_summary.json"
         table_catalog_path = data_dir / "table_catalog.json"
 
         logger.info("Initializing analyst data_dir=%s", str(data_dir))
-        if ble_path.exists() and wifi_path.exists():
-            logger.info("Loading Parquet tables ble=%s wifi=%s", str(ble_path), str(wifi_path))
-            self.tables = {
-                "ble_adv_events": pd.read_parquet(ble_path),
-                "wifi_mgmt_frames": pd.read_parquet(wifi_path),
-            }
-        else:
-            parquet_files = sorted(data_dir.glob("*.parquet"))
-            if parquet_files:
-                logger.info(
-                    "Named demo tables missing; loading %d parquet file(s) from data_dir",
-                    len(parquet_files),
-                )
-                # If a user points --data-dir at a capture export folder, it may contain a single
-                # one-row-per-packet parquet (e.g., produced by wps_pcapng_to_parquet_cli.py).
-                # Load all parquet files and use their stems as dataset names.
-                self.tables = {p.stem: pd.read_parquet(p) for p in parquet_files}
-                if len(self.tables) == 1:
-                    only_name = next(iter(self.tables.keys()))
-                    self.tables["pcap_packets"] = self.tables[only_name]
-            else:
-                logger.info("Parquet tables missing; using built-in synthetic demo tables")
-                self.tables = self._demo_tables()
+        parquet_files = sorted(data_dir.glob("*.parquet"))
+        if not parquet_files:
+            raise ValueError(
+                f"No parquet data files found in data directory '{data_dir}'. "
+                "Provide at least one valid parquet capture dataset."
+            )
+
+        logger.info("Loading %d parquet file(s) from data_dir", len(parquet_files))
+        self.tables = {p.stem: pd.read_parquet(p) for p in parquet_files}
 
         for table in self.tables.values():
             if "timestamp" in table.columns:
                 table["timestamp"] = pd.to_datetime(table["timestamp"], utc=True, errors="coerce")
 
         try:
-            logger.info(
-                "Tables loaded rows ble_adv_events=%d wifi_mgmt_frames=%d",
-                int(len(self.tables.get("ble_adv_events", []))),
-                int(len(self.tables.get("wifi_mgmt_frames", []))),
-            )
+            table_counts = {name: int(len(frame)) for name, frame in self.tables.items()}
+            logger.info("Tables loaded row counts=%s", _json_dumps_safe(table_counts))
         except Exception:
             logger.debug("Could not log table sizes", exc_info=True)
 
@@ -157,7 +138,7 @@ class DemoAnalyst:
             with open(metadata_path, "r", encoding="utf-8") as handle:
                 self.metadata = json.load(handle)
         else:
-            logger.info("Metadata missing; using synthetic metadata")
+            logger.info("Metadata missing; inferring metadata from loaded tables")
 
             known_devices: List[str] = []
             # Best-effort: infer "known devices" from common identifier columns.
@@ -179,15 +160,8 @@ class DemoAnalyst:
             known_devices = sorted(set(known_devices))[:50]
 
             self.metadata = {
-                "environment": "synthetic_demo",
+                "environment": "inferred_from_loaded_tables",
                 "known_devices_present": known_devices,
-                "expected_anomaly_windows": [
-                    {
-                        "start": "2025-01-09T12:10:00Z",
-                        "end": "2025-01-09T12:10:03Z",
-                        "description": "High probe request period",
-                    }
-                ],
             }
 
         self.external_context = self._load_external_context(capture_summary_path, table_catalog_path)
@@ -350,50 +324,6 @@ class DemoAnalyst:
 
         return context
 
-    @staticmethod
-    def _demo_tables() -> Dict[str, pd.DataFrame]:
-        ble_rows = [
-            ["2025-01-10T09:00:00Z", "aa:bb:cc:dd:ee:ff", -55, "ADV_IND", 37, 32, "004C", "180D|180F", 12],
-            ["2025-01-10T09:00:01Z", "aa:bb:cc:dd:ee:ff", -54, "ADV_IND", 38, 30, "004C", "180D", 10],
-            ["2025-01-10T09:00:02Z", "aa:bb:cc:dd:ee:ff", -56, "ADV_IND", 39, 31, "004C", "180D|180F", 11],
-            ["2025-01-10T09:00:10Z", "11:22:33:44:55:66", -70, "ADV_NONCONN_IND", 37, 28, "00E0", "FEAA", 8],
-            ["2025-01-10T09:00:20Z", "11:22:33:44:55:66", -71, "ADV_NONCONN_IND", 38, 29, "00E0", "FEAA", 8],
-            ["2025-01-10T09:00:30Z", "11:22:33:44:55:66", -69, "ADV_NONCONN_IND", 39, 27, "00E0", "FEAA", 8],
-            ["2025-01-10T09:01:00Z", "77:88:99:aa:bb:cc", -62, "ADV_SCAN_IND", 37, 33, "1234", "180A", 9],
-            ["2025-01-10T09:01:01Z", "77:88:99:aa:bb:cc", -61, "ADV_SCAN_IND", 38, 35, "1234", "180A", 9],
-            ["2025-01-10T09:01:02Z", "77:88:99:aa:bb:cc", -63, "ADV_SCAN_IND", 39, 34, "1234", "180A", 9],
-            ["2025-01-10T09:01:20Z", "aa:bb:cc:dd:ee:ff", -58, "ADV_IND", 37, 30, "004C", "180D", 10],
-            ["2025-01-10T09:01:21Z", "aa:bb:cc:dd:ee:ff", -58, "ADV_IND", 38, 31, "004C", "180D", 10],
-            ["2025-01-10T09:01:22Z", "aa:bb:cc:dd:ee:ff", -59, "ADV_IND", 39, 31, "004C", "180D", 10],
-        ]
-        wifi_rows = [
-            ["2025-01-09T12:00:00Z", "10:10:10:10:10:01", "aa:aa:aa:aa:aa:01", "beacon", "CampusWiFi", "6|12|24", "ESS|PRIVACY", 1, -48],
-            ["2025-01-09T12:00:01Z", "10:10:10:10:10:02", "aa:aa:aa:aa:aa:02", "beacon", "CafeGuest", "6|12|24", "ESS|PRIVACY", 6, -56],
-            ["2025-01-09T12:00:05Z", "20:20:20:20:20:01", "aa:aa:aa:aa:aa:01", "probe_req", None, None, None, 1, -60],
-            ["2025-01-09T12:00:06Z", "20:20:20:20:20:02", "aa:aa:aa:aa:aa:01", "probe_req", None, None, None, 1, -62],
-            ["2025-01-09T12:00:07Z", "20:20:20:20:20:03", "aa:aa:aa:aa:aa:02", "probe_req", None, None, None, 6, -64],
-            ["2025-01-09T12:00:08Z", "20:20:20:20:20:04", "aa:aa:aa:aa:aa:01", "probe_req", None, None, None, 1, -63],
-            ["2025-01-09T12:00:10Z", "30:30:30:30:30:01", "aa:aa:aa:aa:aa:01", "assoc_req", "CampusWiFi", "6|12|24", "ESS|PRIVACY", 1, -51],
-            ["2025-01-09T12:00:11Z", "30:30:30:30:30:02", "aa:aa:aa:aa:aa:01", "assoc_req", "CampusWiFi", "6|12|24", "ESS|PRIVACY", 1, -53],
-            ["2025-01-09T12:10:00Z", "20:20:20:20:20:10", "aa:aa:aa:aa:aa:03", "probe_req", None, None, None, 11, -66],
-            ["2025-01-09T12:10:01Z", "20:20:20:20:20:11", "aa:aa:aa:aa:aa:03", "probe_req", None, None, None, 11, -65],
-            ["2025-01-09T12:10:02Z", "20:20:20:20:20:12", "aa:aa:aa:aa:aa:03", "probe_req", None, None, None, 11, -64],
-            ["2025-01-09T12:10:03Z", "20:20:20:20:20:13", "aa:aa:aa:aa:aa:03", "probe_req", None, None, None, 11, -63],
-            ["2025-01-10T09:00:00Z", "20:20:20:20:20:21", "aa:aa:aa:aa:aa:02", "probe_req", None, None, None, 6, -58],
-            ["2025-01-10T09:00:01Z", "20:20:20:20:20:22", "aa:aa:aa:aa:aa:02", "probe_req", None, None, None, 6, -57],
-        ]
-        ble = pd.DataFrame(
-            ble_rows,
-            columns=["timestamp", "advertiser_addr", "rssi", "adv_type", "channel", "length", "company_id", "service_uuids", "mfg_data_len"],
-        )
-        wifi = pd.DataFrame(
-            wifi_rows,
-            columns=["timestamp", "transmitter_mac", "receiver_mac", "frame_subtype", "ssid", "supported_rates", "capabilities_flags", "channel", "rssi"],
-        )
-        ble["timestamp"] = pd.to_datetime(ble["timestamp"], utc=True)
-        wifi["timestamp"] = pd.to_datetime(wifi["timestamp"], utc=True)
-        return {"ble_adv_events": ble, "wifi_mgmt_frames": wifi}
-
     def generate_plan(self, request: AnalysisRequest) -> Dict[str, Any]:
         logger.info("Generating plan planner=%s model=%s", request.planner, request.model)
 
@@ -428,7 +358,7 @@ class DemoAnalyst:
                     logger.warning("LLM repaired plan still invalid: %s", "; ".join(repaired_errors))
 
             logger.warning("LLM planner unavailable/failed/invalid; falling back to heuristic planner")
-        return self._heuristic_plan(request.question)
+        return self._heuristic_plan(request.question, request.dataset)
 
     def _llm_plan(self, request: AnalysisRequest, *, validation_errors: Optional[List[str]]) -> Optional[Dict[str, Any]]:
         api_key_set = bool(os.getenv("OPENAI_API_KEY"))
@@ -605,21 +535,27 @@ class DemoAnalyst:
             logger.warning("LLM plan JSON parse failed; content=%s", content)
             return None
 
-    def _heuristic_plan(self, question: str) -> Dict[str, Any]:
+    def _find_dataset_with_columns(self, columns: List[str], preferred_dataset: Optional[str] = None) -> Optional[str]:
+        if preferred_dataset and preferred_dataset in self.tables:
+            if set(columns) <= set(self.tables[preferred_dataset].columns):
+                return preferred_dataset
+
+        for name, frame in self.tables.items():
+            if set(columns) <= set(frame.columns):
+                return name
+        return None
+
+    def _heuristic_plan(self, question: str, preferred_dataset: Optional[str] = None) -> Dict[str, Any]:
         logger.info("Using heuristic planner")
         q = question.lower()
+        fallback_dataset = preferred_dataset if preferred_dataset in self.tables else next(iter(self.tables.keys()))
 
         if "bluetooth" in q and ("advertis" in q or "advertising" in q) and ("most" in q and "common" in q):
-            # Prefer packet-style parquet if the user pointed --data-dir at a single capture parquet.
-            packet_dataset = None
-            for name, frame in self.tables.items():
-                if {"highest_layer", "layers", "timestamp"} <= set(frame.columns):
-                    packet_dataset = name
-                    break
-            if packet_dataset is None:
-                packet_dataset = "ble_adv_events" if "ble_adv_events" in self.tables else next(iter(self.tables.keys()))
-
-            if packet_dataset in self.tables and "highest_layer" in self.tables[packet_dataset].columns:
+            packet_dataset = self._find_dataset_with_columns(
+                ["highest_layer", "layers", "timestamp"],
+                preferred_dataset,
+            )
+            if packet_dataset:
                 return {
                     "dataset": packet_dataset,
                     "filters": [{"col": "layers", "op": "contains", "value": "BTLE_ADV"}],
@@ -628,39 +564,58 @@ class DemoAnalyst:
                     "plot": {"type": "bar", "x": "highest_layer", "y": "count"},
                     "anomaly": {"method": "robust_z", "on": "count", "threshold": 3.5},
                 }
+
         if "advertise" in q:
-            device = "aa:bb:cc:dd:ee:ff"
-            for token in question.replace("?", "").split():
-                if token.count(":") == 5:
-                    device = token.lower()
-            return {
-                "dataset": "ble_adv_events",
-                "filters": [{"col": "advertiser_addr", "op": "==", "value": device}],
-                "groupby": ["advertiser_addr"],
-                "metrics": [{"name": "count"}],
-                "plot": {"type": "timeseries", "x": "timestamp", "y": "events"},
-                "anomaly": {"method": "robust_z", "on": "count", "threshold": 3.5},
-            }
+            adv_dataset = self._find_dataset_with_columns(["advertiser_addr"], preferred_dataset)
+            if adv_dataset:
+                device = ""
+                for token in question.replace("?", "").split():
+                    if token.count(":") == 5:
+                        device = token.lower()
+                filters = [{"col": "advertiser_addr", "op": "==", "value": device}] if device else []
+                return {
+                    "dataset": adv_dataset,
+                    "filters": filters,
+                    "groupby": ["advertiser_addr"],
+                    "metrics": [{"name": "count"}],
+                    "plot": {"type": "bar", "x": "advertiser_addr", "y": "count"},
+                    "anomaly": {"method": "robust_z", "on": "count", "threshold": 3.5},
+                }
 
         if "probe" in q and ("ap" in q or "bssid" in q):
+            probe_dataset = self._find_dataset_with_columns(["frame_subtype", "receiver_mac"], preferred_dataset)
+            if probe_dataset:
+                return {
+                    "dataset": probe_dataset,
+                    "filters": [{"col": "frame_subtype", "op": "==", "value": "probe_req"}],
+                    "groupby": ["receiver_mac"],
+                    "metrics": [{"name": "count"}],
+                    "plot": {"type": "bar", "x": "receiver_mac", "y": "count"},
+                    "anomaly": {"method": "robust_z", "on": "count", "threshold": 3.5},
+                }
+
+        subtype_dataset = self._find_dataset_with_columns(["frame_subtype"], preferred_dataset)
+        if subtype_dataset:
             return {
-                "dataset": "wifi_mgmt_frames",
-                "filters": [{"col": "frame_subtype", "op": "==", "value": "probe_req"}],
-                "groupby": ["receiver_mac"],
+                "dataset": subtype_dataset,
+                "filters": [
+                    {"col": "frame_subtype", "op": "in", "value": ["probe_req", "assoc_req"]}
+                ],
+                "groupby": ["frame_subtype"],
                 "metrics": [{"name": "count"}],
-                "plot": {"type": "bar", "x": "receiver_mac", "y": "count"},
-                "anomaly": {"method": "robust_z", "on": "count", "threshold": 3.5},
+                "plot": {"type": "bar", "x": "frame_subtype", "y": "count"},
+                "anomaly": {"method": "rolling_shift", "on": "count", "threshold": 2.5},
             }
 
+        frame = self.tables[fallback_dataset]
+        group_col = "timestamp" if "timestamp" in frame.columns else str(frame.columns[0])
         return {
-            "dataset": "wifi_mgmt_frames",
-            "filters": [
-                {"col": "frame_subtype", "op": "in", "value": ["probe_req", "assoc_req"]}
-            ],
-            "groupby": ["frame_subtype"],
+            "dataset": fallback_dataset,
+            "filters": [],
+            "groupby": [group_col],
             "metrics": [{"name": "count"}],
-            "plot": {"type": "hist", "x": "inter_arrival_sec", "bins": 20},
-            "anomaly": {"method": "rolling_shift", "on": "count", "window": 5, "threshold": 2.5},
+            "plot": {"type": "bar", "x": group_col, "y": "count"},
+            "anomaly": {"method": "robust_z", "on": "count", "threshold": 3.5},
         }
 
     def execute_plan(self, plan: Dict[str, Any], question: str, plot_out: Optional[Path]) -> Dict[str, Any]:
@@ -743,7 +698,7 @@ class DemoAnalyst:
                 logger.info("Top group=%s", _json_dumps_safe(facts["top_group"]))
 
         # Additional computed feature for timing-style questions.
-        if "timing" in question.lower() or "distribution" in question.lower():
+        if ("timing" in question.lower() or "distribution" in question.lower()) and "timestamp" in frame.columns:
             logger.info("Computing timing features inter_arrival_sec")
             timed = frame.sort_values("timestamp").copy()
             timed["inter_arrival_sec"] = timed["timestamp"].diff().dt.total_seconds()
@@ -770,30 +725,49 @@ class DemoAnalyst:
         """Safe, tiny code execution mode with prebuilt snippets (extendable)."""
         logger.info("Executing python snippet mode")
         q = question.lower()
-        if "advertise" in q:
-            code = (
-                "df = ble_adv_events.copy()\n"
-                "result = df.groupby('advertiser_addr').size().reset_index(name='count').sort_values('count', ascending=False)"
-            )
-        else:
-            code = (
-                "df = wifi_mgmt_frames[wifi_mgmt_frames['frame_subtype']=='probe_req'].copy()\n"
-                "result = df.groupby('receiver_mac').size().reset_index(name='count').sort_values('count', ascending=False)"
-            )
-        logger.debug("Python snippet code=%s", code)
 
-        local_vars = {
-            "ble_adv_events": self.tables["ble_adv_events"],
-            "wifi_mgmt_frames": self.tables["wifi_mgmt_frames"],
-            "pd": pd,
-            "np": np,
-        }
-        exec(code, {"__builtins__": {}}, local_vars)
-        result = local_vars["result"]
+        if "advertise" in q:
+            dataset = self._find_dataset_with_columns(["advertiser_addr"]) or next(iter(self.tables.keys()))
+            frame = self.tables[dataset]
+            if "advertiser_addr" in frame.columns:
+                result = (
+                    frame.groupby("advertiser_addr")
+                    .size()
+                    .reset_index(name="count")
+                    .sort_values("count", ascending=False)
+                )
+            else:
+                result = pd.DataFrame({"count": [int(len(frame))]})
+        else:
+            dataset = (
+                self._find_dataset_with_columns(["frame_subtype", "receiver_mac"])
+                or self._find_dataset_with_columns(["frame_subtype"])
+                or next(iter(self.tables.keys()))
+            )
+            frame = self.tables[dataset]
+            if {"frame_subtype", "receiver_mac"} <= set(frame.columns):
+                probe = frame[frame["frame_subtype"] == "probe_req"].copy()
+                result = (
+                    probe.groupby("receiver_mac")
+                    .size()
+                    .reset_index(name="count")
+                    .sort_values("count", ascending=False)
+                )
+            elif "frame_subtype" in frame.columns:
+                result = (
+                    frame.groupby("frame_subtype")
+                    .size()
+                    .reset_index(name="count")
+                    .sort_values("count", ascending=False)
+                )
+            else:
+                result = pd.DataFrame({"count": [int(len(frame))]})
+
         return {
             "table": result,
             "facts": {
                 "mode": "python",
+                "dataset": dataset,
                 "rows": int(len(result)),
                 "top_row": result.iloc[0].to_dict() if not result.empty else {},
             },
