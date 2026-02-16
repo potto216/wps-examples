@@ -15,6 +15,7 @@ Raw captures (pcap/pcapng) are too large/noisy to send to an LLM. The demo there
 - operates on pre-extracted Parquet tables (or synthetic demo tables),
 - sends the LLM only small, LLM-friendly context (schemas + a small slice of summary/catalog data),
 - executes analysis locally with a small allow-listed plan format.
+- sends the results back to the LLM for analysis and final report generation
 
 ---
 
@@ -55,8 +56,7 @@ flowchart TD
   B --> C["Tables with capture data<br/>(Parquet)"]
   B --> D["CaptureSummary<br/>(LLM-friendly)"]
   B --> E["TableCatalog<br/>(schema + stats)"]
-  B --> F["Optional: Anomaly scan<br/>(ingestion-time)"]
-
+  
   D --> G[Prompt Builder]
   E --> G
   H["ToolCatalog<br/>(allowed ops)"] --> G
@@ -69,11 +69,9 @@ flowchart TD
   K -->|invalid| J2["Repair loop<br/>(bounded retries)"]
   J2 --> J
 
-  L --> M["ResultPackage<br/>(metrics + tiny tables + plots)"]
+  L --> M["Result Package<br/>(metrics + tiny tables + plots + anomaly analysis)"]
   M --> N[Summarizer LLM]
-  N --> O["Final answer<br/>(narrative + references to plots)"]
-  F --> P["Incident report store<br/>(optional)"]
-  P --> N
+  N --> O["Final answer<br/>(narrative + references to plots)"]  
 ```
 
 ### 4.2 Plan validation & repair loop (bounded)
