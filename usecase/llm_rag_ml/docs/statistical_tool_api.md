@@ -250,7 +250,123 @@ Complete request/response pair for a regression run.
    - Unknown argument when disallowed: return `status=error`, error code `UNKNOWN_ARGUMENT`.
    - No partial execution should occur after schema validation failure.
 
-## 6) Compatibility policy
+## 6) Planner/Executor Lifecycle
+
+To keep planning behavior deterministic, orchestrators should run the following fixed lifecycle for every user request:
+
+1. **Discover Tools**: Load all available `ToolManifest` entries (and versions) into planner context.
+2. **Plan**: LLM emits an ordered list of `ToolInvocation` objects.
+3. **Validate**: Runtime performs JSON-schema validation plus semantic checks (capture availability, time bounds, data sufficiency).
+4. **Execute**: Runtime executes only validated invocations.
+5. **Summarize**: Runtime/LLM composes user-facing summary from `ToolResult.summary` and `structured_output`.
+6. **Repair**: If validation or execution fails, planner regenerates only failed invocations using normalized error payloads.
+
+### Standard error payloads for planner repair
+
+Executor validation and execution failures should be returned in `ToolResult.errors[]` using the canonical shape shown below:
+
+```json
+{
+  "code": "MISSING_REQUIRED_ARGUMENT",
+  "message": "arguments.target is required",
+  "field": "arguments.target"
+}
+```
+
+Use the following required codes and recovery behavior:
+
+| Error code | Field that caused failure | How executor reports it | What planner should regenerate |
+|---|---|---|---|
+| `MISSING_REQUIRED_ARGUMENT` | Missing required key under `arguments.*` (or required invocation envelope field) | `status=error`; include one `errors[]` item per missing key with `field` path and required-key message. | Re-emit the same invocation with all required fields populated from tool schema and task intent; keep `request_id` new per retry. |
+| `INVALID_CAPTURE_SELECTION` | `capture_selection.capture_id`, `capture_selection.selectors.channels[]`, or filter selectors that reference unknown data | `status=error`; set `field` to failing selector path and message naming unknown capture/channel/filter. | Regenerate `capture_selection` using discovered valid capture IDs/channels; preserve operation arguments if still compatible. |
+| `UNSUPPORTED_TIME_RANGE` | `capture_selection.selectors.time_range.start_ms` / `end_ms` outside capture bounds or invalid window (`start_ms > end_ms`) | `status=error`; set `field` to `capture_selection.selectors.time_range` and include supported range in message. | Re-plan with a bounded time range that lies within manifest/runtime limits and requested analysis window. |
+| `INSUFFICIENT_DATA` | Effective dataset after selection is too small for requested operation (for example sample count below statistical minimum) | `status=error` or `status=partial` (if degraded mode exists); set `field` to operation-specific input (often `arguments.operation` or selection path) and include observed sample count. | Regenerate by broadening selection, switching to a compatible method, or adding fallback operation that can run on available samples. |
+
+### End-to-end example: invalid plan -> corrected plan
+
+The first planner attempt fails validation because `target` is missing and the selected time range exceeds capture bounds.
+
+#### Invalid plan output
+
+```json
+[
+  {
+    "tool_name": "statistical_regression_tool",
+    "tool_version": "1.2.0",
+    "capture_selection": {
+      "capture_id": "cap_2026_03_14_a",
+      "selectors": {
+        "time_range": {
+          "start_ms": 0,
+          "end_ms": 999999
+        },
+        "channels": ["ch1", "ch2"],
+        "filters": []
+      }
+    },
+    "arguments": {
+      "operation": "linear_regression",
+      "features": ["snr", "jitter", "packet_loss"]
+    },
+    "request_id": "req-invalid-001",
+    "timeout_ms": 45000
+  }
+]
+```
+
+#### Executor validation response
+
+```json
+{
+  "status": "error",
+  "summary": "Invocation failed validation.",
+  "warnings": [],
+  "errors": [
+    {
+      "code": "MISSING_REQUIRED_ARGUMENT",
+      "message": "arguments.target is required",
+      "field": "arguments.target"
+    },
+    {
+      "code": "UNSUPPORTED_TIME_RANGE",
+      "message": "Requested 0-999999ms but capture cap_2026_03_14_a supports 0-120000ms",
+      "field": "capture_selection.selectors.time_range"
+    }
+  ],
+  "confidence": 0.0
+}
+```
+
+#### Corrected planner output (repair step)
+
+```json
+[
+  {
+    "tool_name": "statistical_regression_tool",
+    "tool_version": "1.2.0",
+    "capture_selection": {
+      "capture_id": "cap_2026_03_14_a",
+      "selectors": {
+        "time_range": {
+          "start_ms": 0,
+          "end_ms": 120000
+        },
+        "channels": ["ch1", "ch2"],
+        "filters": []
+      }
+    },
+    "arguments": {
+      "operation": "linear_regression",
+      "target": "latency_ms",
+      "features": ["snr", "jitter", "packet_loss"]
+    },
+    "request_id": "req-repair-002",
+    "timeout_ms": 45000
+  }
+]
+```
+
+## 7) Compatibility policy
 
 This contract uses semantic versioning: `major.minor.patch`.
 
