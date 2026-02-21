@@ -381,3 +381,186 @@ Backward compatibility expectations:
 - New optional response fields must not break old clients; old clients should ignore unknown fields.
 - Removing or repurposing existing fields requires a major version increment.
 - Deprecations should be announced in advance and preserved for at least one minor release before removal in the next major release.
+
+## 7) How to add a new tool
+
+Use this section as an implementation checklist when introducing a new statistical tool so it is immediately usable by planner + executor flows.
+
+### 7.1 Manifest template (copy/paste skeleton)
+
+```json
+{
+  "name": "<stable_tool_name>",
+  "version": "1.0.0",
+  "description": "<one sentence scope>",
+  "domain_tags": ["<domain>", "<subdomain>"],
+  "capability_keywords": ["<verb_noun>", "<analysis_type>"],
+  "capabilities": ["<canonical_capability_1>", "<canonical_capability_2>"],
+  "input_schema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "<arg_name>": {
+        "type": "string"
+      }
+    },
+    "required": []
+  },
+  "output_schema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "summary_text": { "type": "string" },
+      "tables": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "name": { "type": "string" },
+            "columns": { "type": "array", "items": { "type": "string" } },
+            "rows": {
+              "type": "array",
+              "items": {
+                "type": "array",
+                "items": { "type": ["string", "number", "boolean", "null"] }
+              }
+            }
+          },
+          "required": ["name", "columns", "rows"]
+        }
+      },
+      "confidence": { "type": "number", "minimum": 0.0, "maximum": 1.0 }
+    },
+    "required": ["summary_text", "tables", "confidence"]
+  },
+  "execution_constraints": {
+    "max_timeout_ms": 30000,
+    "max_payload_bytes": 1048576,
+    "supports_streaming": false,
+    "side_effects": "read_only"
+  },
+  "cost_hint": {
+    "unit": "call",
+    "estimated_cost": 0.0,
+    "currency": "credits"
+  },
+  "deterministic": true
+}
+```
+
+### 7.2 Input schema authoring rules
+
+- **Required vs optional arguments**
+  - Put only truly mandatory fields in `required`.
+  - Keep optional arguments in `properties` and document behavior when omitted.
+- **Defaults**
+  - If runtime applies defaults, encode them explicitly using `default` and mirror the same value in implementation docs/tests.
+  - Defaults must be deterministic (no implicit "current time" default without explicit timezone and rounding convention).
+- **Bounded enums**
+  - Use `enum` for closed sets (`"method": {"enum": ["ols", "ridge", "lasso"]}`) so planner retrieval stays stable.
+  - Avoid free-form strings for operation modes when a bounded set is known.
+- **Time range conventions**
+  - Prefer `start_ms` / `end_ms` integer fields in epoch milliseconds.
+  - Define inclusivity (`start_ms` inclusive, `end_ms` inclusive) and enforce `start_ms <= end_ms`.
+  - Require timezone normalization to UTC for any human-readable datetime inputs.
+
+### 7.3 Output schema authoring rules
+
+- **Summary text**
+  - Always provide concise natural-language `summary_text` for direct user-facing composition.
+- **Structured tables**
+  - Include machine-readable tables (`columns` + `rows`) for deterministic downstream processing.
+  - Keep column ordering stable across versions so consumers can safely map indexes.
+- **Confidence**
+  - Include numeric confidence in `[0.0, 1.0]` and define whether it represents model certainty, data quality, or both.
+  - On degraded results, lower confidence and emit a warning explaining the degradation source.
+
+### 7.4 Tool quality checklist
+
+Before publishing a new manifest version, verify all of the following:
+
+- **Determinism**: identical `ToolInvocation` payloads produce equivalent `ToolResult` outputs (except artifact URIs/timestamps if documented).
+- **Explainability**: output includes enough rationale (summary + key metrics) for a human to audit major conclusions.
+- **Runtime bounds**: worst-case runtime and memory are within `execution_constraints`; timeout behavior is tested.
+- **Error reporting**: invalid inputs map to actionable `errors[].code` + `errors[].field` values.
+- **Test vectors**: maintain happy-path, boundary, and invalid-input vectors with fixed expected outputs.
+
+### 7.5 Naming and discoverability conventions
+
+- **Stable tool names**
+  - Use lowercase snake_case names that remain stable across non-breaking releases.
+  - Do not encode version in `name`; use `version` only.
+- **Domain tags**
+  - Add `domain_tags` to help planner retrieval (for example: `"wireless"`, `"wifi"`, `"rf_forensics"`).
+- **Capability keywords**
+  - Add `capability_keywords` with user-intent terms planners can match (`"probe_request_clustering"`, `"channel_occupancy"`).
+  - Keep keywords concise, action-oriented, and reusable across tool families.
+
+### 7.6 Example non-Bluetooth tool stub (`wifi_probe_request_analyzer`)
+
+```json
+{
+  "name": "wifi_probe_request_analyzer",
+  "version": "1.0.0",
+  "description": "Analyzes Wi-Fi probe request bursts to summarize device discovery behavior and channel distribution.",
+  "domain_tags": ["wireless", "wifi", "mac_management"],
+  "capability_keywords": [
+    "probe_request_anomaly_detection",
+    "ssid_entropy_summary",
+    "channel_activity_breakdown"
+  ],
+  "capabilities": ["summary_stats", "burst_detection", "channel_distribution"],
+  "input_schema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "window_ms": { "type": "integer", "minimum": 100, "maximum": 60000, "default": 5000 },
+      "band": { "type": "string", "enum": ["2.4ghz", "5ghz", "6ghz"], "default": "5ghz" },
+      "include_hidden_ssid": { "type": "boolean", "default": true },
+      "top_n_ssids": { "type": "integer", "minimum": 1, "maximum": 100, "default": 10 }
+    },
+    "required": ["window_ms"]
+  },
+  "output_schema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "summary_text": { "type": "string" },
+      "tables": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "name": { "type": "string" },
+            "columns": { "type": "array", "items": { "type": "string" } },
+            "rows": {
+              "type": "array",
+              "items": {
+                "type": "array",
+                "items": { "type": ["string", "number", "boolean", "null"] }
+              }
+            }
+          },
+          "required": ["name", "columns", "rows"]
+        }
+      },
+      "confidence": { "type": "number", "minimum": 0.0, "maximum": 1.0 }
+    },
+    "required": ["summary_text", "tables", "confidence"]
+  },
+  "execution_constraints": {
+    "max_timeout_ms": 20000,
+    "max_payload_bytes": 524288,
+    "supports_streaming": false,
+    "side_effects": "read_only"
+  },
+  "cost_hint": {
+    "unit": "call",
+    "estimated_cost": 0.02,
+    "currency": "credits"
+  },
+  "deterministic": true
+}
+```
+
+This stub intentionally reuses the same envelope and validation patterns from Sections 1-6 so new domains can be added without changing orchestrator behavior.
