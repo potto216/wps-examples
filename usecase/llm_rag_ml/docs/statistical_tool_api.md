@@ -261,6 +261,281 @@ To keep planning behavior deterministic, orchestrators should run the following 
 5. **Summarize**: Runtime/LLM composes user-facing summary from `ToolResult.summary` and `structured_output`.
 6. **Repair**: If validation or execution fails, planner regenerates only failed invocations using normalized error payloads.
 
+## 7) Concrete tool spec: `bluetooth_address_analyzer`
+
+`bluetooth_address_analyzer` infers BLE address types and probabilistic identity linkage under configurable temporal assumptions. The tool is intended for investigative analysis, not deterministic attribution.
+
+### 7.1 Input schema
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "capture_selection": {
+      "type": "object",
+      "properties": {
+        "capture_ids": {
+          "type": "array",
+          "items": { "type": "string" },
+          "minItems": 1
+        },
+        "time_window": {
+          "type": "object",
+          "properties": {
+            "start_ms": { "type": "integer", "minimum": 0 },
+            "end_ms": { "type": "integer", "minimum": 0 }
+          },
+          "required": ["start_ms", "end_ms"]
+        },
+        "filter_expression": {
+          "type": "string",
+          "description": "Optional implementation-specific predicate, e.g., \"adv_type IN ('ADV_IND','ADV_NONCONN_IND')\"."
+        }
+      },
+      "required": ["capture_ids", "time_window"]
+    },
+    "address_columns": {
+      "type": "object",
+      "properties": {
+        "advertiser_addr": { "type": "string" },
+        "initiator_addr": { "type": "string" },
+        "scanner_addr": { "type": "string" }
+      },
+      "required": ["advertiser_addr", "initiator_addr"],
+      "description": "Column names from normalized packet records; scanner_addr is optional."
+    },
+    "analysis_mode": {
+      "type": "string",
+      "enum": ["classification", "linkage", "both"]
+    },
+    "linkage_window_s": {
+      "type": "number",
+      "minimum": 1,
+      "description": "Maximum seconds between related observations when estimating linkage."
+    },
+    "min_observation_count": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Minimum per-address observations required before inference."
+    },
+    "rpa_rotation_model": {
+      "type": "string",
+      "enum": ["spec_default", "fast_rotation", "slow_rotation", "learned"],
+      "description": "Assumption set for random private address rotation cadence."
+    }
+  },
+  "required": [
+    "capture_selection",
+    "address_columns",
+    "analysis_mode",
+    "linkage_window_s",
+    "min_observation_count",
+    "rpa_rotation_model"
+  ]
+}
+```
+
+### 7.2 Output schema
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "address_classification": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "address": { "type": "string" },
+          "type": {
+            "type": "string",
+            "enum": ["public", "random_static", "rpa", "nrpa", "unknown"]
+          },
+          "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+          "evidence": {
+            "type": "array",
+            "items": { "type": "string" }
+          }
+        },
+        "required": ["address", "type", "confidence", "evidence"]
+      }
+    },
+    "probabilistic_links": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "cluster_id": { "type": "string" },
+          "addresses": {
+            "type": "array",
+            "items": { "type": "string" },
+            "minItems": 2
+          },
+          "pairwise_probability_matrix": {
+            "type": "array",
+            "items": {
+              "type": "array",
+              "items": { "type": "number", "minimum": 0, "maximum": 1 }
+            }
+          },
+          "rationale": {
+            "type": "array",
+            "items": { "type": "string" }
+          }
+        },
+        "required": ["cluster_id", "addresses", "pairwise_probability_matrix", "rationale"]
+      }
+    },
+    "timeline_segments": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "address": { "type": "string" },
+          "start_ts": { "type": "string", "description": "RFC3339 timestamp" },
+          "end_ts": { "type": "string", "description": "RFC3339 timestamp" },
+          "activity_score": { "type": "number", "minimum": 0 }
+        },
+        "required": ["address", "start_ts", "end_ts", "activity_score"]
+      }
+    }
+  },
+  "required": ["address_classification", "probabilistic_links", "timeline_segments"]
+}
+```
+
+#### Field types + interpretability notes (LLM-facing)
+
+| Field | Type | Interpretability note |
+|---|---|---|
+| `address_classification[].address` | `string` | Canonical observed BLE address string. Treat as observation key, not a stable device identity. |
+| `address_classification[].type` | `enum` | Predicted address class from header-bit patterns and temporal behavior; may shift across sessions. |
+| `address_classification[].confidence` | `number [0,1]` | Posterior confidence for the class label, not a legal certainty score. |
+| `address_classification[].evidence` | `string[]` | Human-readable features supporting the classification; useful for LLM explanation grounding. |
+| `probabilistic_links[].cluster_id` | `string` | Runtime-generated identifier for one inferred identity cluster. |
+| `probabilistic_links[].addresses` | `string[]` | Addresses likely belonging to the same emitter under the configured model assumptions. |
+| `probabilistic_links[].pairwise_probability_matrix` | `number[][]` | Square matrix aligned to `addresses[]`; each cell is probability two addresses are linked. |
+| `probabilistic_links[].rationale` | `string[]` | Explanatory factors (co-occurrence, rotation interval fit, RSSI continuity, etc.) for link probabilities. |
+| `timeline_segments[].address` | `string` | Address that was active in the segment. |
+| `timeline_segments[].start_ts` | `string (RFC3339)` | Segment start time in absolute wall clock. |
+| `timeline_segments[].end_ts` | `string (RFC3339)` | Segment end time in absolute wall clock. |
+| `timeline_segments[].activity_score` | `number >= 0` | Relative activity intensity in the segment (packet density/weighted duty); compare within the same run only. |
+
+### 7.3 Statistical interpretation
+
+- **Confidence semantics**: `confidence` and linkage probabilities are model-based posterior-like scores conditioned on observed packets plus `rpa_rotation_model` assumptions; they are not frequentist p-values and should not be interpreted as proof.
+- **False positives and caveats**:
+  - Similar traffic profiles from nearby devices can inflate linkage probabilities.
+  - Capture blind spots can force the model to connect addresses across unobserved intervals.
+  - Aggressive `linkage_window_s` values increase recall but may raise false-positive cluster merges.
+  - Use `evidence` and `rationale` fields to present uncertainty and alternate explanations in LLM responses.
+
+### 7.4 Example invocation and output
+
+#### Example invocation
+
+```json
+{
+  "tool_name": "bluetooth_address_analyzer",
+  "tool_version": "1.0.0",
+  "capture_selection": {
+    "capture_ids": ["lab_floor_2026_04_03_a", "lab_floor_2026_04_03_b"],
+    "time_window": {
+      "start_ms": 1712131200000,
+      "end_ms": 1712133000000
+    },
+    "filter_expression": "channel IN (37,38,39) AND rssi > -92"
+  },
+  "arguments": {
+    "address_columns": {
+      "advertiser_addr": "advertiser_addr",
+      "initiator_addr": "initiator_addr",
+      "scanner_addr": "scanner_addr"
+    },
+    "analysis_mode": "both",
+    "linkage_window_s": 180,
+    "min_observation_count": 25,
+    "rpa_rotation_model": "spec_default"
+  },
+  "request_id": "req-bt-71ac9d11",
+  "timeout_ms": 60000
+}
+```
+
+#### Example output
+
+```json
+{
+  "status": "ok",
+  "summary": "Analyzed 4,218 BLE observations; identified one high-confidence 3-address RPA cluster and classified 41 standalone addresses.",
+  "structured_output": {
+    "address_classification": [
+      {
+        "address": "7A:4C:21:9D:10:EF",
+        "type": "rpa",
+        "confidence": 0.93,
+        "evidence": [
+          "Resolvable private bit pattern detected",
+          "Rotation cadence ~14.7 minutes",
+          "Stable manufacturer data payload signature"
+        ]
+      },
+      {
+        "address": "4E:91:B2:6A:77:03",
+        "type": "public",
+        "confidence": 0.98,
+        "evidence": [
+          "Public address bit pattern",
+          "No observed rotation across full window"
+        ]
+      }
+    ],
+    "probabilistic_links": [
+      {
+        "cluster_id": "cluster_rpa_004",
+        "addresses": [
+          "7A:4C:21:9D:10:EF",
+          "61:D2:88:3C:A4:19",
+          "5F:09:2A:7E:CD:44"
+        ],
+        "pairwise_probability_matrix": [
+          [1.0, 0.91, 0.88],
+          [0.91, 1.0, 0.86],
+          [0.88, 0.86, 1.0]
+        ],
+        "rationale": [
+          "Sequential non-overlapping activity windows consistent with RPA rotation",
+          "Matched GATT service UUID set across all three addresses",
+          "RSSI trajectory continuity at receiver rx-north-2"
+        ]
+      }
+    ],
+    "timeline_segments": [
+      {
+        "address": "7A:4C:21:9D:10:EF",
+        "start_ts": "2026-04-03T08:01:13Z",
+        "end_ts": "2026-04-03T08:16:02Z",
+        "activity_score": 0.82
+      },
+      {
+        "address": "61:D2:88:3C:A4:19",
+        "start_ts": "2026-04-03T08:16:05Z",
+        "end_ts": "2026-04-03T08:30:40Z",
+        "activity_score": 0.79
+      }
+    ]
+  },
+  "warnings": [],
+  "errors": [],
+  "confidence": 0.9
+}
+```
+
+### 7.5 Failure modes
+
+- **Sparse observations**: If an address has fewer than `min_observation_count` events, classification may return `unknown` and linkage may be omitted or downgraded (`status=partial`).
+- **Clock gaps**: Sensor clock drift or missing intervals can fragment timeline segments and create artificial handoff patterns.
+- **Overlapping devices with similar behavior**: Devices sharing payload templates and similar motion/RSSI profiles can be merged into one cluster with overstated pairwise probabilities.
 ### Standard error payloads for planner repair
 
 Executor validation and execution failures should be returned in `ToolResult.errors[]` using the canonical shape shown below:
