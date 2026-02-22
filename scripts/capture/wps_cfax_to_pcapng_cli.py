@@ -20,7 +20,8 @@ from wpshelper import (
     wps_open_capture,
     wps_wireless_devices,
     wps_analyze_capture,
-    wps_close_capture
+    wps_close_capture,
+    wps_log_text,
 )
 
 TCP_IP = "127.0.0.1"
@@ -35,10 +36,117 @@ DEFAULT_WPS_PATH = r"C:\Program Files (x86)\Teledyne LeCroy Wireless\Wireless Pr
 LOG_LEVELS = {"debug", "info", "warning", "error", "critical"}
 
 
+def _explain_log_file_error(log_file: str, exc: BaseException) -> str:
+    log_file = os.path.abspath(str(log_file))
+    log_dir = os.path.dirname(log_file)
+
+    lines = [
+        f"Failed to create/open log file: {log_file}",
+        f"Reason: {type(exc).__name__}: {exc}",
+        f"Current working directory: {os.getcwd()}",
+    ]
+
+    if log_dir:
+        lines.append(f"Log directory: {log_dir}")
+        lines.append(f"Log directory exists: {os.path.exists(log_dir)}")
+        if os.path.exists(log_dir):
+            lines.append(f"Log directory is a directory: {os.path.isdir(log_dir)}")
+        else:
+            lines.append("Log directory does not exist (missing parent folder).")
+
+    drive, _ = os.path.splitdrive(log_file)
+    if drive:
+        root = drive + os.sep
+        lines.append(f"Drive root exists ({root}): {os.path.exists(root)}")
+
+    return "\n".join(lines)
+
+
+def _file_handler_stream_for(log_file: str):
+    """Return the stream for the configured FileHandler pointing at log_file, if present."""
+    if not log_file:
+        return None
+
+    target = os.path.abspath(log_file)
+    root = logging.getLogger()
+    for h in getattr(root, "handlers", []) or []:
+        if isinstance(h, logging.FileHandler):
+            base = os.path.abspath(getattr(h, "baseFilename", "") or "")
+            if base == target:
+                return getattr(h, "stream", None)
+    return None
+
+
+def _append_wps_automation_log_if_enabled(
+    *,
+    log_file: Optional[str],
+    wps_handle: Optional[dict],
+    logger: logging.Logger,
+) -> None:
+    """If file logging is enabled, append the cumulative WPS automation log (handle['log']) once, at exit."""
+    if not log_file or not wps_handle:
+        return
+
+    try:
+        txt = wps_log_text(wps_handle)
+    except Exception as e:
+        logger.debug("Could not format WPS automation log via wps_log_text: %s", e, exc_info=True)
+        return
+
+    if not txt.strip():
+        return
+
+    header = "\n===== WPS automation log (cumulative) =====\n"
+    footer = "===== End WPS automation log =====\n"
+
+    # Prefer writing to the existing FileHandler stream (avoids Windows file locking issues).
+    try:
+        stream = _file_handler_stream_for(log_file)
+        if stream is not None:
+            stream.write(header)
+            stream.write(txt if txt.endswith("\n") else (txt + "\n"))
+            stream.write(footer)
+            stream.flush()
+            return
+    except Exception as e:
+        logger.debug("Could not append WPS automation log via FileHandler stream: %s", e, exc_info=True)
+
+    # Fallback: open and append directly.
+    try:
+        log_file_abs = os.path.abspath(log_file)
+        log_dir = os.path.dirname(log_file_abs)
+        if log_dir:
+            os.makedirs(log_dir, exist_ok=True)
+        with open(log_file_abs, "a", encoding="utf-8") as f:
+            f.write(header)
+            f.write(txt if txt.endswith("\n") else (txt + "\n"))
+            f.write(footer)
+    except OSError as e:
+        logger.error(_explain_log_file_error(log_file, e))
+
+
 def configure_logging(log_level: str, log_file: Optional[str]) -> logging.Logger:
     handlers = [logging.StreamHandler(sys.stdout)]
+
     if log_file:
-        handlers.append(logging.FileHandler(log_file))
+        log_file = os.path.abspath(log_file)
+        log_dir = os.path.dirname(log_file)
+
+        if log_dir:
+            try:
+                if os.path.exists(log_dir) and not os.path.isdir(log_dir):
+                    raise NotADirectoryError(f"Log directory path exists but is not a directory: {log_dir}")
+                elif not os.path.exists(log_dir):
+                    raise FileNotFoundError(f"Log directory does not exist: {log_dir}")
+            except OSError as e:
+                raise RuntimeError(_explain_log_file_error(log_file, e)) from e
+
+        # Create/open the log file (surface any issues with a useful explanation).
+        try:
+            handlers.append(logging.FileHandler(log_file, encoding="utf-8"))
+        except OSError as e:
+            raise RuntimeError(_explain_log_file_error(log_file, e)) from e
+
     logging.basicConfig(
         level=getattr(logging, log_level.upper()),
         format="%(asctime)s %(levelname)s %(message)s",
@@ -159,6 +267,9 @@ def export_capture(
 
 
 def main() -> None:
+    # Create a logger early so we can still log from finally even if configure_logging fails mid-way.
+    logger = logging.getLogger("wps_cfax_to_pcapng_cli")
+
     wps_installations = wps_find_installations(base_dir=DEFAULT_WPS_BASE_DIR, show_log=False)
     latest_install = (wps_installations or {}).get("latest") or {}
     default_wps_path = latest_install.get("path") or DEFAULT_WPS_PATH
@@ -176,7 +287,7 @@ def main() -> None:
     parser.add_argument(
         "--technology-filter",
         default="LE",
-        help="Technology filter string to pass to the pcapng export, if supported by WPS.",
+        help="Technology filter string to pass to the pcapng export, currently supported by WPS [Classic,LE,80211,WPAN]. Multiple names should be listed without spaces, e.g. 'LE,80211' not 'LE, 80211'.",
     )
     parser.add_argument("--log-level", default="info", help="Log level (debug, info, warning, error, critical).")
     parser.add_argument("--log-file", help="Optional log file path.")
@@ -277,10 +388,20 @@ def main() -> None:
         logger.exception("Conversion failed: %s", exc)
         raise
     finally:
+        # Only at program exit: append the cumulative WPS automation log to the same log file (if enabled).
+        _append_wps_automation_log_if_enabled(log_file=getattr(args, "log_file", None), wps_handle=wps_handle, logger=logger)
+
         if wps_handle:
-            wps_close(wps_handle, show_log=args.verbose)
+            try:
+                wps_close(wps_handle, show_log=getattr(args, "verbose", False))
+            except Exception:
+                logger.debug("wps_close failed during cleanup", exc_info=True)
+
         if server_process:
-            server_process.terminate()
+            try:
+                server_process.terminate()
+            except Exception:
+                logger.debug("Failed to terminate server process during cleanup", exc_info=True)
 
 
 if __name__ == "__main__":

@@ -148,6 +148,8 @@ Export `.cfax` captures to `.pcapng` with optional technology filters.
 
 ```powershell
 python scripts/capture/wps_cfax_to_pcapng_cli.py "D:\captures" --recursive --skip-existing --technology-filter LE
+python scripts/capture/wps_cfax_to_pcapng_cli.py "D:\captures" --recursive --skip-existing --technology-filter LE,80211
+ python scripts/capture/wps_cfax_to_pcapng_cli.py "D:\captures" --recursive --skip-existing --technology-filter LE,80211 --wps-path "C:\Program Files (x86)\Teledyne LeCroy Wireless\Wireless Protocol Suite 4.50" --log-file "D:\captures\wps_cfax_to_pcapng_cli.log" --log-level INFO
 ```
 
 ## Convert PCAPNG to parquet: `capture/wps_pcapng_to_parquet_cli.py`
