@@ -105,6 +105,69 @@ Security note: avoid committing this file to source control; treat it like a sec
 - Built-in synthetic tables are used by default so the demo runs without extra files.
 - Optional `data/` folder can override inputs with `ble_adv_events.csv`, `wifi_mgmt_frames.csv`, and `metadata.json`.
 
+## Preparing capture data (CFAX/PCAPNG → Parquet → LLM summary)
+
+For capture files the typical workflow is:
+
+1. Convert WPS `.cfax` captures to `.pcapng`.
+2. Convert `.pcapng` to `.parquet` tables.
+3. Generate `capture_summary.json` and `table_catalog.json` for use by `llm_guided_stat_analyst_demo.py`.
+
+Run these commands from the repo root.
+
+### 1) CFAX → PCAPNG (Windows + Wireless Protocol Suite)
+
+Example (Git Bash / WSL; uses `\` line continuations):
+
+```bash
+python scripts/capture/wps_cfax_to_pcapng_cli.py "D:\\captures" \
+  --recursive \
+  --skip-existing \
+  --technology-filter LE,80211 \
+  --wps-path "C:\\Program Files (x86)\\Teledyne LeCroy Wireless\\Wireless Protocol Suite 4.50" \
+  --log-file "D:\\captures\\wps_cfax_to_pcapng_cli.log" \
+  --log-level INFO \
+  --recv-retry-attempts 30 \
+  --recv-retry-sleep 30
+```
+
+PowerShell one-liner (no line continuations):
+
+```powershell
+python scripts/capture/wps_cfax_to_pcapng_cli.py "D:\captures" --recursive --skip-existing --technology-filter LE,80211 --wps-path "C:\Program Files (x86)\Teledyne LeCroy Wireless\Wireless Protocol Suite 4.50" --log-file "D:\captures\wps_cfax_to_pcapng_cli.log" --log-level INFO --recv-retry-attempts 30 --recv-retry-sleep 30
+```
+
+Notes:
+- `--technology-filter LE,80211` keeps only Bluetooth LE + Wi‑Fi (802.11).
+- `--skip-existing` makes the conversion re-runnable.
+- `--wps-path` must point at your local WPS installation directory.
+
+### 2) PCAPNG → Parquet (Linux/macOS/Windows)
+
+Point this at a folder containing one or more `.pcapng` files:
+
+```bash
+python scripts/capture/wps_pcapng_to_parquet_cli.py \
+  ~/data/captures/ \
+  --recursive \
+  --skip-existing
+```
+
+This produces one or more `.parquet` files that the analysis scripts can load.
+
+### 3) Generate LLM summary artifacts (capture_summary + table_catalog)
+
+Pick a specific `.parquet` file and write the artifacts to an output directory:
+
+```bash
+# creates capture_summary.json and table_catalog.json for use with llm_guided_stat_analyst_demo.py queries
+python scripts/analysis/wps_parquet_llm_summary_cli.py \
+  ./captures/x500_bredr_le_2m_wifi_wpan.parquet \
+  --output-dir ./tmp
+```
+
+You can then point `llm_guided_stat_analyst_demo.py` at the directory containing your `.parquet` tables (and optionally these JSON artifacts).
+
 ## Run examples
 
 Example questions:
