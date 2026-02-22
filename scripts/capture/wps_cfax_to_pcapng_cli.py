@@ -29,6 +29,8 @@ TCP_PORT = 22901
 MAX_TO_READ = 1000
 SLEEP_TIME = 2
 MAX_WAIT_TIME = 60
+DEFAULT_RECV_RETRY_ATTEMPTS = 10
+DEFAULT_RECV_RETRY_SLEEP = 15.0
 
 DEFAULT_WPS_BASE_DIR = r"C:\Program Files (x86)\Teledyne LeCroy Wireless"
 DEFAULT_WPS_PATH = r"C:\Program Files (x86)\Teledyne LeCroy Wireless\Wireless Protocol Suite 4.50"
@@ -49,6 +51,7 @@ def _explain_log_file_error(log_file: str, exc: BaseException) -> str:
     if log_dir:
         lines.append(f"Log directory: {log_dir}")
         lines.append(f"Log directory exists: {os.path.exists(log_dir)}")
+        # do not create the directory if it does not exist, but report on the parent folder existence and type to help diagnose common issues like a missing parent folder or a file in place of the expected log directory.
         if os.path.exists(log_dir):
             lines.append(f"Log directory is a directory: {os.path.isdir(log_dir)}")
         else:
@@ -243,26 +246,19 @@ def export_capture(
     logger: logging.Logger,
 ) -> None:
     pcapng_path = pcapng_path_for(cfax_path)
-    logger.info("Opening capture %s", cfax_path)
-    #open_kwargs, _ = resolve_function_params(wps_open_capture, verbose)
+    logger.info("Opening capture: %s", cfax_path)
 
     wps_open_capture(wps_handle, cfax_path, show_log=verbose)
-    wps_wireless_devices(wps_handle, action="select", action_parameters={'type':'bluetooth','address':'all','select':'yes'}, show_log=verbose)
-    wps_analyze_capture(wps_handle,show_log=verbose)
-    logger.info("Exporting pcapng to %s", pcapng_path)
+    wps_wireless_devices(
+        wps_handle,
+        action="select",
+        action_parameters={"type": "bluetooth", "address": "all", "select": "yes"},
+        show_log=verbose,
+    )
+    wps_analyze_capture(wps_handle, show_log=verbose)
+
+    logger.info("Exporting pcapng (tech=%s) -> %s", technology_filter, pcapng_path)
     time.sleep(5)
-    # export_kwargs, filter_param = resolve_function_params(
-    #     wps_export_pcapng,
-    #     verbose,
-    #     technology_filter=technology_filter,
-    # )
-    # if filter_param and technology_filter:
-    #     export_kwargs[filter_param] = technology_filter
-    # elif technology_filter:
-    #     logger.debug(
-    #         "wps_export_pcapng does not accept a technology filter parameter; continuing without --technology-filter=%s",
-    #         technology_filter,
-    #     )
     wps_export_pcapng(wps_handle, pcapng_path, tech=technology_filter, show_log=verbose)
 
 
@@ -321,6 +317,18 @@ def main() -> None:
         default=MAX_WAIT_TIME,
         help=f"Max seconds to wait for WPS initialization (default: {MAX_WAIT_TIME}).",
     )
+    parser.add_argument(
+        "--recv-retry-attempts",
+        type=int,
+        default=DEFAULT_RECV_RETRY_ATTEMPTS,
+        help=f"Number of receive retry attempts for WPS automation calls (default: {DEFAULT_RECV_RETRY_ATTEMPTS}).",
+    )
+    parser.add_argument(
+        "--recv-retry-sleep",
+        type=float,
+        default=DEFAULT_RECV_RETRY_SLEEP,
+        help=f"Seconds to sleep between receive retries (default: {DEFAULT_RECV_RETRY_SLEEP}).",
+    )
 
     args = parser.parse_args()
     args.log_level = args.log_level.lower()
@@ -331,19 +339,52 @@ def main() -> None:
     if args.verbose:
         logger.setLevel(logging.DEBUG)
 
-    logger.info("WPS installations scan (base_dir=%s):\n%s", DEFAULT_WPS_BASE_DIR, json.dumps(wps_installations, indent=2, sort_keys=True))
+    # Log key settings (including recursive) and input
+    logger.info(
+        "Settings: input_path=%s recursive=%s skip_existing=%s technology_filter=%s verbose=%s log_file=%s log_level=%s",
+        args.input_path,
+        args.recursive,
+        args.skip_existing,
+        args.technology_filter,
+        args.verbose,
+        args.log_file,
+        args.log_level,
+    )
+    logger.info(
+        "WPS automation: tcp_ip=%s tcp_port=%s sleep_time=%s max_wait_time=%s recv_retry_attempts=%s recv_retry_sleep=%s wps_path=%s",
+        args.tcp_ip,
+        args.tcp_port,
+        args.sleep_time,
+        args.max_wait_time,
+        args.recv_retry_attempts,
+        args.recv_retry_sleep,
+        args.wps_path,
+    )
+
+    logger.info(
+        "WPS installations scan (base_dir=%s):\n%s",
+        DEFAULT_WPS_BASE_DIR,
+        json.dumps(wps_installations, indent=2, sort_keys=True),
+    )
     logger.info("Default WPS path selected: %s", default_wps_path)
 
     wps_executable_path = os.path.join(args.wps_path, "Executables", "Core")
     auto_server_path = args.auto_server_path or os.path.join(wps_executable_path, "FTSAutoServer.exe")
 
     cfax_files = sorted(iter_cfax_files(args.input_path, args.recursive))
+    logger.info("Discovered %d .cfax file(s).", len(cfax_files))
+    if args.verbose and cfax_files:
+        for i, p in enumerate(cfax_files, start=1):
+            logger.debug("cfax[%d/%d]=%s", i, len(cfax_files), p)
+
     if not cfax_files:
-        logger.warning("No .cfax files found under %s", args.input_path)
+        logger.warning("No .cfax files found under %s (recursive=%s)", args.input_path, args.recursive)
         return
 
     server_process = None
     wps_handle = None
+    last_opened_cfax: Optional[str] = None
+
     try:
         server_process = start_server(auto_server_path, logger)
         wps_handle = wps_open(
@@ -354,42 +395,43 @@ def main() -> None:
             personality_key="VIEW",
             sleep_time=args.sleep_time,
             max_wait_time=args.max_wait_time,
-            recv_retry_attempts=10,
-            recv_retry_sleep=5,
+            recv_retry_attempts=args.recv_retry_attempts,
+            recv_retry_sleep=args.recv_retry_sleep,
         )
-        close_previous_capture=False
-        for cfax_path in cfax_files:
-            if close_previous_capture:
-                # TODO: Resolve why getting this error:
-                # 2026-01-18 23:50:53,237 INFO Opening capture x240_bredr_le_2m_20260114_064910.cfax
-                # wps_open_capture: sending: b'Open Capture File;x240_bredr_le_2m_20260114_064910.cfax;notify=1'
-                # _recv_and_parse: PCAPNG EXPORT;FAILED;Timestamp=1/18/2026 11:50:57 PM;Reason=Could not open capture  file             
-                time.sleep(10)
-                # Adding a delay because getting this unusual error
-                logger.info("Slept now closing and  starting the next file")
-                wps_close_capture(wps_handle,capture_absolute_filename=cfax_path, show_log=args.verbose)
+
+        for idx, cfax_path in enumerate(cfax_files, start=1):
+            logger.info("Processing file %d/%d: %s", idx, len(cfax_files), cfax_path)
 
             pcapng_path = pcapng_path_for(cfax_path)
             if args.skip_existing and os.path.exists(pcapng_path):
-                logger.info("Skipping %s (pcapng already exists)", cfax_path)
+                logger.info("Skipping %s (pcapng already exists: %s)", cfax_path, pcapng_path)
                 continue
+
+            # Close the previous capture (if any) before opening the next one.
+            if last_opened_cfax:
+                try:
+                    # Small delay to reduce WPS "Could not open capture file" flakiness between captures.
+                    time.sleep(2)
+                    logger.debug("Closing previous capture: %s", last_opened_cfax)
+                    wps_close_capture(wps_handle, capture_absolute_filename=last_opened_cfax, show_log=args.verbose)
+                except Exception:
+                    logger.debug("Failed to close previous capture (continuing): %s", last_opened_cfax, exc_info=True)
+
             export_capture(wps_handle, cfax_path, args.verbose, args.technology_filter, logger)
             logger.info("Converted %s -> %s", cfax_path, pcapng_path)
-            close_previous_capture=True
-            
-            # This is temorary to close the capture between files to avoid errors
-            wps_close(wps_handle, show_log=args.verbose)
-            server_process.terminate()
-            # terminate the program
-            sys.exit(0)
-           
+
+            last_opened_cfax = cfax_path
 
     except Exception as exc:
         logger.exception("Conversion failed: %s", exc)
         raise
     finally:
         # Only at program exit: append the cumulative WPS automation log to the same log file (if enabled).
-        _append_wps_automation_log_if_enabled(log_file=getattr(args, "log_file", None), wps_handle=wps_handle, logger=logger)
+        _append_wps_automation_log_if_enabled(
+            log_file=getattr(args, "log_file", None),
+            wps_handle=wps_handle,
+            logger=logger,
+        )
 
         if wps_handle:
             try:
@@ -402,7 +444,6 @@ def main() -> None:
                 server_process.terminate()
             except Exception:
                 logger.debug("Failed to terminate server process during cleanup", exc_info=True)
-
 
 if __name__ == "__main__":
     main()
