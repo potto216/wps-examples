@@ -4,7 +4,7 @@ This repository is a collection of examples for automation tasks using [Teledyne
 
 # Use Cases
 
-- [Optimizing Bluetooth Audio Broadcasts with Python](usecase/README.md)
+- [Use case index](usecase/README.md)
 
 
 # Examples
