@@ -48,13 +48,14 @@ See [`lib/README.md`](lib/README.md) for naming, layout, and dependency-manageme
 
 ## Repository 
 Clone the repository with
-```
+```bash
 git clone --recursive https://github.com/potto216/wps-examples.git
 ```
-To include the submodules. If you have problems the following may be helpful
+To include the submodules. If you have problems the following may be helpful.
 
+### Working with the wpshelper submodule
 After cloning the repository, follow these steps to pull the wpshelper submodule to ensure it matches the exact version tracked:
-```
+```bash
 git submodule update --init --recursive
 Submodule 'wpshelper' (git@github.com:potto216/wpshelper.git) registered for path 'wpshelper'
 Cloning into '/home/user/bluetooth/wps/wps_bluetooth_examples/wpshelper'...
@@ -62,16 +63,26 @@ Submodule path 'wpshelper': checked out 'a846e7f14a876227d6198bbca53e598942c73f3
 ```
 
 After initialization to update wpshelper to the latest commit used by main use
-```
+```bash
 git submodule update --init --recursive
 ```
 
 If you need to use the latest version of wpshelper from its remote repository rather than the specifically pinned versions (for example you are going to make a contribution) then use:
-```
+```bash
 # use sync if making changes to .gitmodules
 git submodule sync
 git submodule update --recursive --remote
 ```
+
+If your goal is “discard local changes and get back to the exact submodule commit pinned by wps-examples”, run this from the repo root:
+```bash
+cd wps-examples
+git -C wpshelper reset --hard
+git -C wpshelper clean -fdx
+git submodule update --init --recursive --force
+git status
+```
+
 ## Notes
 To determine the `scapy` version and see if the needed bluetooth classes are used run:
 
