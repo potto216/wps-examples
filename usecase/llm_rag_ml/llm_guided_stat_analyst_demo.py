@@ -238,44 +238,80 @@ class DemoAnalyst:
             if plot_type == "timeseries" and "timestamp" not in columns:
                 errors.append("Timeseries plot requested but dataset has no 'timestamp' column")
 
-        # Enforce metrics rules when grouping (prevents KeyError: 'count' later).
-        groupby_cols = plan.get("groupby") or []
-        metrics = plan.get("metrics") or []
+        supported_metrics = {"count", "mean", "sum", "std", "quantile"}
 
+        # Validate metric objects regardless of grouping so schema/plan behavior is consistent.
+        metrics = plan.get("metrics") or []
+        if not isinstance(metrics, list):
+            errors.append("Field 'metrics' must be an array of metric objects.")
+            metrics = []
+
+        metric_names: List[str] = []
+        for idx, m in enumerate(metrics):
+            if not isinstance(m, dict):
+                errors.append(
+                    f"Metric #{idx} must be an object like {{\"name\": \"count\"}} or "
+                    "{\"name\": \"mean\", \"col\": \"latency_ms\"}."
+                )
+                continue
+
+            name = str(m.get("name", "")).strip().lower()
+            if not name:
+                errors.append(f"Metric #{idx} is missing required field 'name'.")
+                continue
+            metric_names.append(name)
+
+            if name not in supported_metrics:
+                errors.append(
+                    f"Metric #{idx} has unsupported name '{name}'. "
+                    f"Supported metrics: {sorted(supported_metrics)}"
+                )
+                continue
+
+            if name == "count":
+                continue
+
+            col = m.get("col")
+            if not isinstance(col, str) or col not in columns:
+                errors.append(f"Metric #{idx} ('{name}') requires valid column field 'col'.")
+                continue
+
+            if not pd.api.types.is_numeric_dtype(frame[col]):
+                errors.append(
+                    f"Metric #{idx} ('{name}') requires numeric column '{col}', "
+                    f"but dtype is {frame[col].dtype}."
+                )
+
+            if name == "quantile":
+                q = m.get("q")
+                if not isinstance(q, (int, float)):
+                    errors.append(f"Metric #{idx} ('quantile') requires numeric field 'q' in [0, 1].")
+                elif q < 0 or q > 1:
+                    errors.append(f"Metric #{idx} ('quantile') has out-of-range q={q}; expected 0 <= q <= 1.")
+
+        # Enforce metrics rules when grouping (prevents missing-aggregation failures).
+        groupby_cols = plan.get("groupby") or []
         if groupby_cols:
-            if not isinstance(metrics, list) or len(metrics) == 0:
+            if len(metrics) == 0:
                 errors.append(
                     "Plan uses 'groupby' but 'metrics' is empty. "
                     "Include at least: metrics: [{\"name\": \"count\"}]"
                 )
-            else:
-                metric_names: List[str] = []
-                for m in metrics:
-                    if not isinstance(m, dict):
-                        errors.append("Each entry in 'metrics' must be an object like {\"name\": \"count\"}.")
-                        continue
-                    name = str(m.get("name", "")).strip().lower()
-                    if not name:
-                        errors.append("Metric is missing required field 'name'.")
-                        continue
-                    metric_names.append(name)
-
-                # This demo executor currently only supports 'count' for grouped results.
-                supported_metrics = {"count"}
-                unsupported = sorted({n for n in metric_names if n and n not in supported_metrics})
-                if unsupported:
-                    errors.append(
-                        f"Unsupported metric(s) for grouped analysis: {unsupported}. "
-                        f"Supported metrics: {sorted(supported_metrics)}"
-                    )
-
-                if "count" not in metric_names:
-                    errors.append(
-                        "Plan uses 'groupby' but does not include metric 'count'. "
-                        "Add: metrics: [{\"name\": \"count\"}]"
-                    )
 
         return errors
+
+    @staticmethod
+    def _metric_output_name(metric: Dict[str, Any]) -> str:
+        name = str(metric.get("name", "")).strip().lower()
+        col = str(metric.get("col", "")).strip()
+
+        if name == "count":
+            return "count"
+        if name == "quantile":
+            q = float(metric.get("q", 0.5))
+            pct = int(round(q * 100))
+            return f"p{pct}_{col}"
+        return f"{name}_{col}"
 
     @staticmethod
     def _load_external_context(capture_summary_path: Path, table_catalog_path: Path) -> Dict[str, Any]:
@@ -452,12 +488,35 @@ class DemoAnalyst:
                     "metrics": {
                         "type": "array",
                         "items": {
-                            "type": "object",
-                            "additionalProperties": False,  # <-- MUST be false
-                            "required": ["name"],
-                            "properties": {
-                                "name": {"type": "string"},
-                            },
+                            "oneOf": [
+                                {
+                                    "type": "object",
+                                    "additionalProperties": False,
+                                    "required": ["name"],
+                                    "properties": {
+                                        "name": {"type": "string", "enum": ["count"]},
+                                    },
+                                },
+                                {
+                                    "type": "object",
+                                    "additionalProperties": False,
+                                    "required": ["name", "col"],
+                                    "properties": {
+                                        "name": {"type": "string", "enum": ["mean", "sum", "std"]},
+                                        "col": {"type": "string"},
+                                    },
+                                },
+                                {
+                                    "type": "object",
+                                    "additionalProperties": False,
+                                    "required": ["name", "col", "q"],
+                                    "properties": {
+                                        "name": {"type": "string", "enum": ["quantile"]},
+                                        "col": {"type": "string"},
+                                        "q": {"type": "number", "minimum": 0, "maximum": 1},
+                                    },
+                                },
+                            ]
                         },
                     },
 
@@ -689,10 +748,26 @@ class DemoAnalyst:
             logger.info("Computing grouped metrics groupby=%s metrics=%s", groupby_cols, plan.get("metrics", []))
             grouped = frame.groupby(groupby_cols, dropna=False)
             agg = pd.DataFrame(index=grouped.size().index)
+            metric_dispatch = {
+                "count": lambda g, metric: g.size(),
+                "mean": lambda g, metric: g[metric["col"]].mean(),
+                "sum": lambda g, metric: g[metric["col"]].sum(),
+                "std": lambda g, metric: g[metric["col"]].std(),
+                "quantile": lambda g, metric: g[metric["col"]].quantile(float(metric["q"])),
+            }
+
             for metric in plan.get("metrics", []):
-                if metric["name"] == "count":
-                    agg["count"] = grouped.size()
-            result_table = agg.reset_index().sort_values("count", ascending=False)
+                metric_name = str(metric.get("name", "")).strip().lower()
+                handler = metric_dispatch.get(metric_name)
+                if handler is None:
+                    continue
+                output_col = self._metric_output_name(metric)
+                agg[output_col] = handler(grouped, metric)
+
+            sort_col = "count" if "count" in agg.columns else (next(iter(agg.columns), None))
+            result_table = agg.reset_index()
+            if sort_col:
+                result_table = result_table.sort_values(sort_col, ascending=False)
             facts["top_group"] = result_table.iloc[0].to_dict() if not result_table.empty else {}
             if facts.get("top_group"):
                 logger.info("Top group=%s", _json_dumps_safe(facts["top_group"]))
