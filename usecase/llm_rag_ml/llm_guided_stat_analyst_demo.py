@@ -796,28 +796,48 @@ class DemoAnalyst:
             if facts.get("top_group"):
                 logger.info("Top group=%s", _json_dumps_safe(facts["top_group"]))
 
+        timing_table: Optional[pd.DataFrame] = None
+        timing_question = "timing" in question.lower() or "distribution" in question.lower()
+
         # Additional computed feature for timing-style questions.
-        if ("timing" in question.lower() or "distribution" in question.lower()) and "timestamp" in frame.columns:
+        if timing_question and "timestamp" in frame.columns:
             logger.info("Computing timing features inter_arrival_sec")
             timed = frame.sort_values("timestamp").copy()
             timed["inter_arrival_sec"] = timed["timestamp"].diff().dt.total_seconds()
-            result_table = timed.dropna(subset=["inter_arrival_sec"])
-            facts["inter_arrival_mean"] = float(result_table["inter_arrival_sec"].mean()) if not result_table.empty else None
-            facts["inter_arrival_p95"] = float(result_table["inter_arrival_sec"].quantile(0.95)) if not result_table.empty else None
+            timing_table = timed.dropna(subset=["inter_arrival_sec"])
+            facts["inter_arrival_mean"] = float(timing_table["inter_arrival_sec"].mean()) if not timing_table.empty else None
+            facts["inter_arrival_p95"] = float(timing_table["inter_arrival_sec"].quantile(0.95)) if not timing_table.empty else None
 
         anomaly_report = self._anomaly_detect(plan.get("anomaly", {}), result_table)
         logger.info("Anomalies detected=%d", len(anomaly_report))
         logger.debug("Anomaly details=%s", _json_dumps_safe(anomaly_report))
 
+        timing_anomalies: List[Dict[str, Any]] = []
+        if timing_table is not None:
+            timing_anomalies = self._anomaly_detect(
+                {**(plan.get("anomaly", {}) or {}), "on": "inter_arrival_sec"},
+                timing_table,
+            )
+            logger.info("Timing anomalies detected=%d", len(timing_anomalies))
+
         if plot_out:
+            plot_source = result_table
+            plot_cfg = plan.get("plot", {}) or {}
+            if (
+                timing_table is not None
+                and isinstance(plot_cfg, dict)
+                and plot_cfg.get("source") == "timing"
+            ):
+                plot_source = timing_table
             logger.info("Writing plot=%s", str(plot_out))
-            self._plot(plan.get("plot", {}), result_table, plot_out)
+            self._plot(plot_cfg, plot_source, plot_out)
             facts["plot_path"] = str(plot_out)
 
         return {
             "table": result_table,
             "facts": facts,
             "anomalies": anomaly_report,
+            "timing_anomalies": timing_anomalies,
         }
 
     def execute_python(self, question: str) -> Dict[str, Any]:
@@ -871,6 +891,7 @@ class DemoAnalyst:
                 "top_row": result.iloc[0].to_dict() if not result.empty else {},
             },
             "anomalies": [],
+            "timing_anomalies": [],
         }
 
     @staticmethod
