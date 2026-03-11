@@ -247,6 +247,7 @@ class DemoAnalyst:
             metrics = []
 
         metric_names: List[str] = []
+        metric_output_cols: set[str] = set()
         for idx, m in enumerate(metrics):
             if not isinstance(m, dict):
                 errors.append(
@@ -267,6 +268,8 @@ class DemoAnalyst:
                     f"Supported metrics: {sorted(supported_metrics)}"
                 )
                 continue
+
+            metric_output_cols.add(self._metric_output_name(m))
 
             if name == "count":
                 continue
@@ -297,6 +300,27 @@ class DemoAnalyst:
                     "Plan uses 'groupby' but 'metrics' is empty. "
                     "Include at least: metrics: [{\"name\": \"count\"}]"
                 )
+
+        anomaly_cfg = plan.get("anomaly") or {}
+        if isinstance(anomaly_cfg, dict):
+            target_col = anomaly_cfg.get("on", "count")
+            if not isinstance(target_col, str) or not target_col.strip():
+                errors.append("Field 'anomaly.on' must be a non-empty string.")
+            else:
+                target_col = target_col.strip()
+                is_metric_output = target_col in metric_output_cols
+                is_raw_numeric = target_col in columns and pd.api.types.is_numeric_dtype(frame[target_col])
+                if not is_metric_output and not (not groupby_cols and is_raw_numeric):
+                    if groupby_cols:
+                        errors.append(
+                            f"Field 'anomaly.on' must reference a computed metric output column when groupby is used; got '{target_col}'. "
+                            f"Known metric outputs: {sorted(metric_output_cols)}"
+                        )
+                    else:
+                        errors.append(
+                            f"Field 'anomaly.on' must be either a metric output column or a numeric dataset column; got '{target_col}'. "
+                            f"Known metric outputs: {sorted(metric_output_cols)}"
+                        )
 
         return errors
 
@@ -851,10 +875,37 @@ class DemoAnalyst:
 
     @staticmethod
     def _anomaly_detect(anomaly_cfg: Dict[str, Any], table: pd.DataFrame) -> List[Dict[str, Any]]:
-        if table.empty or "count" not in table.columns:
+        if table.empty:
             return []
 
-        values = table["count"].astype(float)
+        target_col = anomaly_cfg.get("on", "count")
+        if not isinstance(target_col, str) or not target_col.strip():
+            target_col = "count"
+        target_col = target_col.strip()
+
+        if target_col not in table.columns:
+            return [
+                {
+                    "record_type": "warning",
+                    "warning_code": "missing_anomaly_target_column",
+                    "message": f"Anomaly target column '{target_col}' not found in result table.",
+                    "target_col": target_col,
+                    "available_columns": list(table.columns),
+                }
+            ]
+
+        values = pd.to_numeric(table[target_col], errors="coerce")
+        if values.notna().sum() == 0:
+            return [
+                {
+                    "record_type": "warning",
+                    "warning_code": "non_numeric_anomaly_target_column",
+                    "message": f"Anomaly target column '{target_col}' is not numeric.",
+                    "target_col": target_col,
+                    "source_dtype": str(table[target_col].dtype),
+                }
+            ]
+
         method = anomaly_cfg.get("method", "robust_z")
         if method == "robust_z":
             median = values.median()
@@ -864,6 +915,7 @@ class DemoAnalyst:
             flags = score.abs() > threshold
             flagged = table.loc[flags].copy()
             flagged["score"] = score[flags]
+            flagged["target_col"] = target_col
             return flagged.to_dict("records")
 
         # rolling shift heuristic
@@ -874,6 +926,7 @@ class DemoAnalyst:
         flags = shift > threshold
         flagged = table.loc[flags].copy()
         flagged["score"] = shift[flags].fillna(0.0)
+        flagged["target_col"] = target_col
         return flagged.to_dict("records")
 
     @staticmethod
