@@ -440,6 +440,10 @@ class DemoAnalyst:
             "You MUST use only datasets and column names that exist in the provided table schema. "
             "Filter operators must be one of: ==, !=, in, contains, between. "
             "For op 'between', set value to a 2-item array like [lower, upper] (numbers or timestamps). "
+            "Each metric object must include keys name, col, q. "
+            "Use {\"name\": \"count\", \"col\": null, \"q\": null} for count. "
+            "Use {\"name\": \"mean\"|\"sum\"|\"std\", \"col\": \"<numeric_column>\", \"q\": null} for numeric aggregates. "
+            "Use {\"name\": \"quantile\", \"col\": \"<numeric_column>\", \"q\": <0_to_1>} for quantiles. "
             f"Datasets available: {available_datasets}. "
             f"Question: {request.question}"
         )
@@ -512,35 +516,24 @@ class DemoAnalyst:
                     "metrics": {
                         "type": "array",
                         "items": {
-                            "oneOf": [
-                                {
-                                    "type": "object",
-                                    "additionalProperties": False,
-                                    "required": ["name"],
-                                    "properties": {
-                                        "name": {"type": "string", "enum": ["count"]},
-                                    },
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": ["name", "col", "q"],
+                            "properties": {
+                                "name": {"type": "string", "enum": ["count", "mean", "sum", "std", "quantile"]},
+                                "col": {
+                                    "anyOf": [
+                                        {"type": "string"},
+                                        {"type": "null"},
+                                    ]
                                 },
-                                {
-                                    "type": "object",
-                                    "additionalProperties": False,
-                                    "required": ["name", "col"],
-                                    "properties": {
-                                        "name": {"type": "string", "enum": ["mean", "sum", "std"]},
-                                        "col": {"type": "string"},
-                                    },
+                                "q": {
+                                    "anyOf": [
+                                        {"type": "number", "minimum": 0, "maximum": 1},
+                                        {"type": "null"},
+                                    ]
                                 },
-                                {
-                                    "type": "object",
-                                    "additionalProperties": False,
-                                    "required": ["name", "col", "q"],
-                                    "properties": {
-                                        "name": {"type": "string", "enum": ["quantile"]},
-                                        "col": {"type": "string"},
-                                        "q": {"type": "number", "minimum": 0, "maximum": 1},
-                                    },
-                                },
-                            ]
+                            },
                         },
                     },
 
