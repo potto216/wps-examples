@@ -1,0 +1,30 @@
+{
+  "dataset": "ble_adv_events",
+  "filters": [
+    {
+      "col": "advertiser_addr",
+      "op": "==",
+      "value": "aa:bb:cc:dd:ee:ff"
+    }
+  ],
+  "groupby": [
+    "advertiser_addr"
+  ],
+  "metrics": [
+    {
+      "name": "count",
+      "col": null,
+      "q": null
+    }
+  ],
+  "plot": {
+    "type": "bar",
+    "x": "advertiser_addr",
+    "y": "count"
+  },
+  "anomaly": {
+    "method": "robust_z",
+    "on": "count",
+    "threshold": 3.5
+  }
+}

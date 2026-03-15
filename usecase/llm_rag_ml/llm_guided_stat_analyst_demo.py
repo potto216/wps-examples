@@ -7,7 +7,7 @@ import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Protocol
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -21,6 +21,183 @@ except Exception:  # pragma: no cover - optional dependency for local demo
 LOG_LEVELS = {"debug", "info", "warning", "error", "critical"}
 LOG_TO_CHOICES = {"stdout", "file"}
 logger = logging.getLogger("llm_guided_stat_analyst_demo")
+
+
+class LLMBackend(Protocol):
+    def available(self) -> bool:
+        ...
+
+    def create_plan(
+        self,
+        *,
+        model: str,
+        messages: List[Dict[str, str]],
+        response_format: Dict[str, Any],
+        reasoning_effort: str,
+        question: str,
+    ) -> Optional[str]:
+        ...
+
+    def create_report(
+        self,
+        *,
+        model: str,
+        messages: List[Dict[str, str]],
+        reasoning_effort: str,
+        question: str,
+    ) -> Optional[str]:
+        ...
+
+
+class OpenAIBackend:
+    def __init__(self) -> None:
+        self._api_key_set = bool(os.getenv("OPENAI_API_KEY"))
+
+    def available(self) -> bool:
+        return OpenAI is not None and self._api_key_set
+
+    def create_plan(
+        self,
+        *,
+        model: str,
+        messages: List[Dict[str, str]],
+        response_format: Dict[str, Any],
+        reasoning_effort: str,
+        question: str,
+    ) -> Optional[str]:
+        if not self.available():
+            return None
+        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        kwargs: Dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+            "response_format": response_format,
+            "reasoning_effort": reasoning_effort,
+        }
+        logger.info("OpenAI chat.completions.create model=%s", model)
+        logger.debug("OpenAI request payload=%s", _json_dumps_safe(kwargs))
+        try:
+            response = client.chat.completions.create(**kwargs)
+        except Exception as e:
+            try:
+                body = getattr(e, "body", None) or {}
+                err = (body.get("error") or {}) if isinstance(body, dict) else {}
+                if err.get("param") == "temperature" and err.get("code") == "unsupported_value":
+                    logger.info("Model rejected temperature; retrying with default temperature.")
+                    kwargs.pop("temperature", None)
+                    response = client.chat.completions.create(**kwargs)
+                else:
+                    raise
+            except Exception:
+                logger.exception("OpenAI request failed")
+                return None
+        logger.debug("OpenAI raw response=%s", _json_dumps_safe(_openai_response_to_jsonable(response)))
+        try:
+            return str(response.choices[0].message.content)
+        except Exception:
+            logger.exception("Unexpected OpenAI response shape")
+            return None
+
+    def create_report(
+        self,
+        *,
+        model: str,
+        messages: List[Dict[str, str]],
+        reasoning_effort: str,
+        question: str,
+    ) -> Optional[str]:
+        if not self.available():
+            return None
+        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                messages=messages,
+                reasoning_effort=reasoning_effort,
+            )
+            logger.debug("OpenAI report raw response=%s", _json_dumps_safe(_openai_response_to_jsonable(response)))
+            return str(response.choices[0].message.content).strip()
+        except Exception:
+            logger.exception("LLM report generation failed; falling back to local summary")
+            return None
+
+
+class MockFileLLMBackend:
+    def __init__(self, responses_file: Path) -> None:
+        self.responses_file = responses_file
+        if not responses_file.exists():
+            raise FileNotFoundError(f"Mock LLM responses file not found: {responses_file}")
+        with open(responses_file, "r", encoding="utf-8") as handle:
+            self._config = json.load(handle)
+        if not isinstance(self._config, dict):
+            raise ValueError("Mock LLM responses file must be a JSON object")
+
+    def available(self) -> bool:
+        return True
+
+    def _resolve_content(self, entry: Dict[str, Any]) -> Optional[str]:
+        if "content" in entry:
+            content = entry["content"]
+            if isinstance(content, str):
+                return content
+            return json.dumps(content)
+        if "content_file" in entry:
+            path = (self.responses_file.parent / str(entry["content_file"])).resolve()
+            if path.suffix.lower() == ".json":
+                return path.read_text(encoding="utf-8")
+            return path.read_text(encoding="utf-8")
+        return None
+
+    def _pick_response(self, section: str, question: str) -> Optional[str]:
+        candidates = self._config.get(section, [])
+        if isinstance(candidates, list):
+            q = question.lower()
+            for item in candidates:
+                if not isinstance(item, dict):
+                    continue
+                needle = str(item.get("question_contains", "")).strip().lower()
+                if not needle or needle in q:
+                    value = self._resolve_content(item)
+                    if value is not None:
+                        return value
+        default_entry = self._config.get("default", {}).get(section)
+        if isinstance(default_entry, dict):
+            return self._resolve_content(default_entry)
+        if default_entry is not None:
+            return default_entry if isinstance(default_entry, str) else json.dumps(default_entry)
+        return None
+
+    def create_plan(
+        self,
+        *,
+        model: str,
+        messages: List[Dict[str, str]],
+        response_format: Dict[str, Any],
+        reasoning_effort: str,
+        question: str,
+    ) -> Optional[str]:
+        return self._pick_response("plan", question)
+
+    def create_report(
+        self,
+        *,
+        model: str,
+        messages: List[Dict[str, str]],
+        reasoning_effort: str,
+        question: str,
+    ) -> Optional[str]:
+        return self._pick_response("report", question)
+
+
+def create_llm_backend(backend: str, *, mock_llm_responses_file: Optional[str]) -> LLMBackend:
+    name = str(backend).strip().lower()
+    if name == "openai":
+        return OpenAIBackend()
+    if name == "mock-file":
+        if not mock_llm_responses_file:
+            raise ValueError("--mock-llm-responses-file is required when --llm-backend mock-file is used")
+        return MockFileLLMBackend(Path(mock_llm_responses_file))
+    raise ValueError(f"Unsupported llm backend '{backend}'")
 
 
 def configure_logging(log_level: str, *, log_to: str, log_file: Optional[str]) -> None:
@@ -106,8 +283,9 @@ class AnalysisRequest:
 class DemoAnalyst:
     """Simple end-to-end analyst using plan execution or safe Python snippets."""
 
-    def __init__(self, data_dir: Path) -> None:
+    def __init__(self, data_dir: Path, *, llm_backend: LLMBackend) -> None:
         self.data_dir = data_dir
+        self.llm_backend = llm_backend
         metadata_path = data_dir / "metadata.json"
         capture_summary_path = data_dir / "capture_summary.json"
         table_catalog_path = data_dir / "table_catalog.json"
@@ -421,13 +599,8 @@ class DemoAnalyst:
         return self._heuristic_plan(request.question, request.dataset)
 
     def _llm_plan(self, request: AnalysisRequest, *, validation_errors: Optional[List[str]]) -> Optional[Dict[str, Any]]:
-        api_key_set = bool(os.getenv("OPENAI_API_KEY"))
-        if OpenAI is None or not api_key_set:
-            logger.info(
-                "LLM planner not available openai_imported=%s OPENAI_API_KEY_set=%s",
-                OpenAI is not None,
-                api_key_set,
-            )
+        if not self.llm_backend.available():
+            logger.info("LLM planner backend not available")
             return None
 
         available_datasets = sorted(self.tables.keys())
@@ -563,48 +736,17 @@ class DemoAnalyst:
         }
 
 
-        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-
-        # Build kwargs without temperature (gpt-5-nano rejects non-default temperature).
-        kwargs: Dict[str, Any] = {
-            "model": request.model,
-            "messages": messages,
-            "response_format": {"type": "json_schema", "json_schema": plan_schema},
-            # Optional: reduce reasoning cost/speed; models before gpt-5.1 default to medium. :contentReference[oaicite:3]{index=3}
-            "reasoning_effort": "minimal",
-        }
-
-        logger.info("OpenAI chat.completions.create model=%s", request.model)
-        logger.debug("OpenAI request payload=%s", _json_dumps_safe(kwargs))
-
-        try:
-            response = client.chat.completions.create(**kwargs)
-
-        except Exception as e:
-            # If you later decide to add temperature for some models, keep this retry logic:
-            # retry when the API says temperature is unsupported for this model.
-            try:
-                body = getattr(e, "body", None) or {}
-                err = (body.get("error") or {}) if isinstance(body, dict) else {}
-                if err.get("param") == "temperature" and err.get("code") == "unsupported_value":
-                    logger.info("Model rejected temperature; retrying with default temperature.")
-                    kwargs.pop("temperature", None)
-                    response = client.chat.completions.create(**kwargs)
-                else:
-                    raise
-            except Exception:
-                logger.exception("OpenAI request failed")
-                return None
-
-        logger.debug("OpenAI raw response=%s", _json_dumps_safe(_openai_response_to_jsonable(response)))
-
-        try:
-            content = response.choices[0].message.content
-        except Exception:
-            logger.exception("Unexpected OpenAI response shape")
+        content = self.llm_backend.create_plan(
+            model=request.model,
+            messages=messages,
+            response_format={"type": "json_schema", "json_schema": plan_schema},
+            reasoning_effort="minimal",
+            question=request.question,
+        )
+        if content is None:
             return None
 
-        logger.debug("OpenAI parsed content=%s", content)
+        logger.debug("LLM parsed content=%s", content)
         try:
             return json.loads(content)
         except json.JSONDecodeError:
@@ -1003,14 +1145,10 @@ def build_llm_report(
     facts: Dict[str, Any],
     anomalies: List[Dict[str, Any]],
     model: str,
+    llm_backend: LLMBackend,
 ) -> Optional[str]:
-    api_key_set = bool(os.getenv("OPENAI_API_KEY"))
-    if OpenAI is None or not api_key_set:
-        logger.info(
-            "Skipping LLM report generation openai_imported=%s OPENAI_API_KEY_set=%s",
-            OpenAI is not None,
-            api_key_set,
-        )
+    if not llm_backend.available():
+        logger.info("Skipping LLM report generation because backend is unavailable")
         return None
 
     logger.info("Sending execution results to LLM for report model=%s", model)
@@ -1034,20 +1172,16 @@ def build_llm_report(
         },
     ]
 
-    try:
-        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-        response = client.chat.completions.create(
-            model=model,
-            messages=messages,
-            reasoning_effort="minimal",
-        )
-        logger.debug("LLM report raw response=%s", _json_dumps_safe(_openai_response_to_jsonable(response)))
-        content = response.choices[0].message.content
-        logger.info("Received human-readable report from LLM")
-        return str(content).strip()
-    except Exception:
-        logger.exception("LLM report generation failed; falling back to local summary")
+    content = llm_backend.create_report(
+        model=model,
+        messages=messages,
+        reasoning_effort="minimal",
+        question=question,
+    )
+    if content is None:
         return None
+    logger.info("Received human-readable report from LLM")
+    return str(content).strip()
 
 
 def parse_args() -> argparse.Namespace:
@@ -1072,6 +1206,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--planner", choices=["heuristic", "llm"], default=argparse.SUPPRESS)
     parser.add_argument("--execution-mode", choices=["plan", "python"], default=argparse.SUPPRESS)
     parser.add_argument("--model", default=argparse.SUPPRESS)
+    parser.add_argument(
+        "--llm-backend",
+        choices=["openai", "mock-file"],
+        default=argparse.SUPPRESS,
+        help="LLM backend to use for planner/report generation",
+    )
+    parser.add_argument(
+        "--mock-llm-responses-file",
+        default=argparse.SUPPRESS,
+        help="Path to a JSON file containing deterministic mock LLM responses",
+    )
     parser.add_argument(
         "--skip-plot-generation",
         action="store_true",
@@ -1105,6 +1250,8 @@ def parse_args() -> argparse.Namespace:
         "planner": "heuristic",
         "execution_mode": "plan",
         "model": "gpt-5-nano",
+        "llm_backend": "openai",
+        "mock_llm_responses_file": None,
         "dataset": None,
         "openai_api_key": None,
         "output_dir": "usecase/llm_rag_ml/artifacts",
@@ -1145,6 +1292,7 @@ def write_reports(
     output: Dict[str, Any],
     question: str,
     llm_model: str,
+    llm_backend: LLMBackend,
 ) -> Dict[str, str]:
     output_dir.mkdir(parents=True, exist_ok=True)
     logger.info("Preparing report artifacts")
@@ -1156,6 +1304,7 @@ def write_reports(
         facts=output["facts"],
         anomalies=output["anomalies"],
         model=llm_model,
+        llm_backend=llm_backend,
     )
     if llm_summary:
         summary = llm_summary
@@ -1192,7 +1341,11 @@ def main() -> None:
             logger.info("OPENAI_API_KEY set from JSON config")
 
     logger.info("CLI args=%s", _json_dumps_safe(_redact_secrets(vars(args))))
-    analyst = DemoAnalyst(Path(args.data_dir))
+    llm_backend = create_llm_backend(
+        args.llm_backend,
+        mock_llm_responses_file=getattr(args, "mock_llm_responses_file", None),
+    )
+    analyst = DemoAnalyst(Path(args.data_dir), llm_backend=llm_backend)
     req = AnalysisRequest(
         question=args.question,
         planner=args.planner,
@@ -1221,6 +1374,7 @@ def main() -> None:
         output=output,
         question=req.question,
         llm_model=req.model,
+        llm_backend=llm_backend,
     )
     logger.info("Artifacts written=%s", _json_dumps_safe(artifacts))
 

@@ -1,0 +1,14 @@
+{
+  "question": "How often does device aa:bb:cc:dd:ee:ff advertise?",
+  "model": "mock-model",
+  "input_tables": [
+    {
+      "table_name": "ble_adv_events",
+      "csv_file": "input/ble_adv_events.csv"
+    }
+  ],
+  "mock_llm_responses_file": "mock_llm_responses.json",
+  "expected_plan_file": "expected/plan.json",
+  "expected_facts_file": "expected/facts.json",
+  "expected_summary_file": "expected/summary.txt"
+}

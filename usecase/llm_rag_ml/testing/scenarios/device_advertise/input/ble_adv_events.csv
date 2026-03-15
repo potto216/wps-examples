@@ -1,0 +1,4 @@
+timestamp,advertiser_addr,rssi
+2025-01-01T00:00:00Z,aa:bb:cc:dd:ee:ff,-60
+2025-01-01T00:00:01Z,aa:bb:cc:dd:ee:ff,-62
+2025-01-01T00:00:02Z,11:22:33:44:55:66,-70
