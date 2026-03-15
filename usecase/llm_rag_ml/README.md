@@ -54,6 +54,8 @@ Supported keys:
 
 - `question` (required)
 - `data_dir`, `planner`, `execution_mode`, `model`, `output_dir`, `skip_plot_generation`
+- `llm_backend` (`openai` or `mock-file`)
+- `mock_llm_responses_file` (required when `llm_backend` is `mock-file`)
 - `dataset` (optional; forces a specific dataset name when multiple Parquet tables are loaded)
 - `log_level`, `log_to`, `log_file`
 - `openai_api_key` (optional; see next section)
@@ -98,6 +100,51 @@ If you prefer, you can put the key in the JSON config file as `openai_api_key`. 
 ```
 
 Security note: avoid committing this file to source control; treat it like a secret.
+
+## Mock LLM backend for deterministic testing
+
+You can run the analyst against a file-based mock LLM backend so tests are repeatable and do not require network access or API keys.
+
+### Mock response file format
+
+`mock_llm_responses_file` points to a JSON file with `plan` and `report` lists. Each list item can match a question using `question_contains`, and return response text either inline (`content`) or from a file (`content_file`).
+
+```json
+{
+  "plan": [
+    {"question_contains": "advertise", "content_file": "expected/plan.json"}
+  ],
+  "report": [
+    {"question_contains": "advertise", "content_file": "expected/summary.txt"}
+  ]
+}
+```
+
+### Run the main demo with the mock LLM
+
+```bash
+python usecase/llm_rag_ml/llm_guided_stat_analyst_demo.py \
+  --planner llm \
+  --llm-backend mock-file \
+  --mock-llm-responses-file usecase/llm_rag_ml/testing/scenarios/device_advertise/mock_llm_responses.json \
+  --data-dir /path/to/parquet_data \
+  --question "How often does device aa:bb:cc:dd:ee:ff advertise?"
+```
+
+### Scenario-driven test harness
+
+A reusable scenario runner is provided at `usecase/llm_rag_ml/testing/mock_llm_scenario_runner.py`.
+
+- Scenario file: `usecase/llm_rag_ml/testing/scenarios/device_advertise/scenario.json`
+- Test: `tests/test_llm_guided_stat_analyst_mock_llm.py`
+
+Run the test:
+
+```bash
+python -m unittest tests/test_llm_guided_stat_analyst_mock_llm.py
+```
+
+This setup is designed so you can add more scenarios by creating another folder with input CSV files, mock LLM outputs, and expected artifacts.
 
 ## Files
 

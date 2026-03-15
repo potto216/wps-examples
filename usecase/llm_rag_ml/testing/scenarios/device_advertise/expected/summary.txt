@@ -1,0 +1,3 @@
+Summary: Mock LLM report generated for deterministic test.
+Key Findings: The requested advertiser appears 2 times.
+Anomaly Assessment: No significant anomalies detected.

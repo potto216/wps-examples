@@ -1,0 +1,8 @@
+{
+  "dataset": "ble_adv_events",
+  "rows_after_filter": 2,
+  "top_group": {
+    "advertiser_addr": "aa:bb:cc:dd:ee:ff",
+    "count": 2
+  }
+}

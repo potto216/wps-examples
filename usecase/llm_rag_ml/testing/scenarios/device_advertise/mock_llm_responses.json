@@ -1,0 +1,14 @@
+{
+  "plan": [
+    {
+      "question_contains": "advertise",
+      "content_file": "expected/plan.json"
+    }
+  ],
+  "report": [
+    {
+      "question_contains": "advertise",
+      "content_file": "expected/summary.txt"
+    }
+  ]
+}
