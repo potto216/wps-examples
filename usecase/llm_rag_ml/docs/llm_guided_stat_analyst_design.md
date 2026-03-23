@@ -30,6 +30,14 @@ Raw captures (pcap/pcapng) are too large/noisy to send to an LLM. The demo there
    - Optional **AnomalyContext** (precomputed anomalies / unusual events list)
 
 ### B. Analysis assistant (two-stage LLM)
+
+```mermaid
+flowchart LR
+  A["Capture data"<br/>summary + schema] --> C["Planner<br/>create analysis plan"]
+  C --> D["Executor<br/>run locally on Parquet"]
+  D --> E["Summary + artifacts<br/>answer, report, plot"]
+```
+
 4. **Planner LLM**: receives `{CaptureSummary + TableCatalog + ToolCatalog + UserQuestion}` and outputs a **structured plan**.
    - Either heuristic planner (default) or LLM planner (`planner=llm`).
    - LLM planner returns strict JSON (OpenAI `response_format=json_schema`).
@@ -45,6 +53,8 @@ Raw captures (pcap/pcapng) are too large/noisy to send to an LLM. The demo there
    - final answer narrative
    - optionally a compact incident report section (if anomalies requested or found)
    - Always write artifacts: `plan.json`, `facts.json`, `anomalies.json`, `summary.txt`, `incident_report.md`, `result_preview.txt`.
+
+
 ---
 
 ## 4) Flowcharts

@@ -32,21 +32,24 @@ python usecase/llm_rag_ml/llm_guided_stat_analyst_demo.py \
 ```
 
 ### Example config
-
+Assume running from the root path and that the directory ./tmp exists and a file set data_01 was created.
 Create `usecase/llm_rag_ml/llm_guided_stat_analyst_demo.json`:
 
 ```json
 {
   "question": "Which AP had the most probe requests yesterday?",
-  "data_dir": "usecase/llm_rag_ml/data",
+  "data_dir": "tmp/data",
+  "dataset": "data_01",
   "planner": "llm",
+  "llm_backend": "openai",
   "execution_mode": "plan",
   "model": "gpt-5-nano",
-  "output_dir": "usecase/llm_rag_ml/artifacts",
-  "skip_plot_generation": false,
+  "output_dir": "tmp/usecase/llm_rag_ml_01/artifacts",
+  "skip_plot_generation": true,
   "log_level": "info",
-  "log_to": "stdout",
-  "log_file": null
+  "log_to": "file",
+  "log_file": "usecase/llm_rag_ml_01/logs/llm_guided_stat_analyst_demo.log",
+  "mock_llm_response_file": "tmp/usecase/llm_rag_ml_01/tests/mock_response_01.json"
 }
 ```
 
