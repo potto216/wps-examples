@@ -60,21 +60,31 @@ def _get_packet_field(packet: Packet, field_name: str) -> object:
 def _extract_channel_and_rssi(packet: Packet) -> tuple[Optional[int], Optional[int]]:
     channel = None
     rssi = None
+    layer_presence = {
+        "BTLE_PPI": BTLE_PPI is not None and packet.haslayer(BTLE_PPI),
+        "BTLE_RF": BTLE_RF is not None and packet.haslayer(BTLE_RF),
+        "RadioTap": RadioTap is not None and packet.haslayer(RadioTap),
+        "Dot11": Dot11 is not None and packet.haslayer(Dot11),
+    }
+    logger.debug("Channel/RSSI layer presence: %s", layer_presence)
 
     if BTLE_PPI is not None and packet.haslayer(BTLE_PPI):
         ppi = packet[BTLE_PPI]
         channel = _coerce_optional_int(getattr(ppi, "btle_channel", None))
         rssi = _coerce_optional_int(getattr(ppi, "rssi_avg", None))
+        logger.debug("Using BTLE_PPI metadata for channel/rssi extraction")
         return channel, rssi
 
     if BTLE_RF is not None and packet.haslayer(BTLE_RF):
         rf = packet[BTLE_RF]
         channel = _coerce_optional_int(getattr(rf, "rf_channel", None))
         rssi = _coerce_optional_int(getattr(rf, "signal", None))
+        logger.debug("Using BTLE_RF metadata for channel/rssi extraction")
         return channel, rssi
 
     if RadioTap is not None and packet.haslayer(RadioTap):
         radiotap = packet[RadioTap]
+        logger.debug("Using RadioTap metadata for channel/rssi extraction")
         channel = _coerce_optional_int(_get_packet_field(radiotap, "ChannelPlusNumber"))
         if channel is not None and channel <= 0:
             channel = None
@@ -87,6 +97,9 @@ def _extract_channel_and_rssi(packet: Packet) -> tuple[Optional[int], Optional[i
                 _coerce_optional_int(_get_packet_field(radiotap, "ChannelPlusFrequency"))
             )
         rssi = _coerce_optional_int(_get_packet_field(radiotap, "dBm_AntSignal"))
+
+    if not any(layer_presence.values()):
+        logger.debug("No BTLE_PPI, BTLE_RF, RadioTap, or Dot11 layer found for channel/rssi extraction")
 
     return channel, rssi
 
@@ -251,20 +264,15 @@ class PcapngPacketDataFrameConverter:
         src, dst = _extract_src_dst(packet)
 
         packet_bytes = bytes(packet)
-        layer_names = [layer.__name__ for layer in packet.layers()]
         wire_length = _coerce_optional_int(getattr(packet, "wirelen", None))
 
-
         logger.debug(
-            "Packet %d extracted channel=%s rssi=%s channel_source=%s",
+            "Packet %d extracted channel=%s rssi=%s",
             packet_index,
             channel,
             rssi,
-            channel_source,
         )
 
-        src = getattr(packet, "src", None)
-        dst = getattr(packet, "dst", None)
         logger.debug(
             "Packet %d addressing src=%s dst=%s highest_layer=%s",
             packet_index,
@@ -273,22 +281,20 @@ class PcapngPacketDataFrameConverter:
             getattr(packet, "lastlayer", lambda: "unknown")(),
         )
 
-        raw_bytes = bytes(packet)
         row = PacketRow(
             packet_index=packet_index,
             timestamp=ts,
             timestamp_unix_s=ts_unix_s,
-            captured_length=len(raw_bytes),
-            wire_length=int(getattr(packet, "wirelen", len(raw_bytes))),
+            captured_length=len(packet_bytes),
+            wire_length=wire_length if wire_length is not None else len(packet_bytes),
             highest_layer=str(getattr(packet, "lastlayer", lambda: "unknown")()),
             layers="|".join(layer_names),
             summary=str(packet.summary()),
             channel=channel,
             rssi=rssi,
-            src=str(src) if src is not None else None,
-            dst=str(dst) if dst is not None else None,
-            raw_hex=raw_bytes.hex(),
-
+            src=src,
+            dst=dst,
+            raw_hex=packet_bytes.hex(),
         )
         logger.debug("Packet %d row=%s", packet_index, row.to_dict())
         return row
