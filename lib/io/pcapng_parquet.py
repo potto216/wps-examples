@@ -16,6 +16,92 @@ except Exception:  # pragma: no cover - depends on scapy build
     BTLE_PPI = None
     BTLE_RF = None
 
+try:
+    from scapy.layers.dot11 import Dot11, RadioTap  # type: ignore
+except Exception:  # pragma: no cover - depends on scapy build
+    Dot11 = None
+    RadioTap = None
+
+
+def _coerce_optional_int(value: object) -> Optional[int]:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except Exception:
+        return None
+
+
+def _wifi_channel_from_frequency(frequency_mhz: Optional[int]) -> Optional[int]:
+    if frequency_mhz is None:
+        return None
+    if frequency_mhz == 2484:
+        return 14
+    if 2412 <= frequency_mhz <= 2472:
+        return ((frequency_mhz - 2412) // 5) + 1
+    if 5000 <= frequency_mhz <= 5895:
+        return (frequency_mhz - 5000) // 5
+    if 5955 <= frequency_mhz <= 7115:
+        return (frequency_mhz - 5950) // 5
+    return None
+
+
+def _get_packet_field(packet: Packet, field_name: str) -> object:
+    try:
+        value = packet.getfieldval(field_name)
+    except Exception:
+        value = None
+    if value is not None:
+        return value
+    return getattr(packet, "fields", {}).get(field_name)
+
+
+def _extract_channel_and_rssi(packet: Packet) -> tuple[Optional[int], Optional[int]]:
+    channel = None
+    rssi = None
+
+    if BTLE_PPI is not None and packet.haslayer(BTLE_PPI):
+        ppi = packet[BTLE_PPI]
+        channel = _coerce_optional_int(getattr(ppi, "btle_channel", None))
+        rssi = _coerce_optional_int(getattr(ppi, "rssi_avg", None))
+        return channel, rssi
+
+    if BTLE_RF is not None and packet.haslayer(BTLE_RF):
+        rf = packet[BTLE_RF]
+        channel = _coerce_optional_int(getattr(rf, "rf_channel", None))
+        rssi = _coerce_optional_int(getattr(rf, "signal", None))
+        return channel, rssi
+
+    if RadioTap is not None and packet.haslayer(RadioTap):
+        radiotap = packet[RadioTap]
+        channel = _coerce_optional_int(_get_packet_field(radiotap, "ChannelPlusNumber"))
+        if channel is not None and channel <= 0:
+            channel = None
+        if channel is None:
+            channel = _wifi_channel_from_frequency(
+                _coerce_optional_int(_get_packet_field(radiotap, "ChannelFrequency"))
+            )
+        if channel is None:
+            channel = _wifi_channel_from_frequency(
+                _coerce_optional_int(_get_packet_field(radiotap, "ChannelPlusFrequency"))
+            )
+        rssi = _coerce_optional_int(_get_packet_field(radiotap, "dBm_AntSignal"))
+
+    return channel, rssi
+
+
+def _extract_src_dst(packet: Packet) -> tuple[Optional[str], Optional[str]]:
+    src = getattr(packet, "src", None)
+    dst = getattr(packet, "dst", None)
+    if src is not None or dst is not None:
+        return (str(src) if src is not None else None, str(dst) if dst is not None else None)
+
+    if Dot11 is not None and packet.haslayer(Dot11):
+        dot11 = packet[Dot11]
+        return dot11.addr2, dot11.addr1
+
+    return None, None
+
 
 @dataclass
 class PacketRow:
@@ -85,40 +171,27 @@ class PcapngPacketDataFrameConverter:
             if ts is pd.NaT or pd.isna(ts):
                 ts = None
 
-        channel = None
-        rssi = None
-        if BTLE_PPI is not None and packet.haslayer(BTLE_PPI):
-            ppi = packet[BTLE_PPI]
-            chan = getattr(ppi, "btle_channel", None)
-            channel = int(chan) if chan is not None else None
-            signal = getattr(ppi, "rssi_avg", None)
-            rssi = int(signal) if signal is not None else None
-        elif BTLE_RF is not None and packet.haslayer(BTLE_RF):
-            rf = packet[BTLE_RF]
-            chan = getattr(rf, "rf_channel", None)
-            channel = int(chan) if chan is not None else None
-            signal = getattr(rf, "signal", None)
-            rssi = int(signal) if signal is not None else None
+        channel, rssi = _extract_channel_and_rssi(packet)
+        src, dst = _extract_src_dst(packet)
 
-        src = getattr(packet, "src", None)
-        dst = getattr(packet, "dst", None)
-
+        packet_bytes = bytes(packet)
         layer_names = [layer.__name__ for layer in packet.layers()]
+        wire_length = _coerce_optional_int(getattr(packet, "wirelen", None))
 
         return PacketRow(
             packet_index=packet_index,
             timestamp=ts,
             timestamp_unix_s=ts_unix_s,
-            captured_length=len(bytes(packet)),
-            wire_length=int(getattr(packet, "wirelen", len(bytes(packet)))),
+            captured_length=len(packet_bytes),
+            wire_length=wire_length if wire_length is not None else len(packet_bytes),
             highest_layer=str(getattr(packet, "lastlayer", lambda: "unknown")()),
             layers="|".join(layer_names),
             summary=str(packet.summary()),
             channel=channel,
             rssi=rssi,
-            src=str(src) if src is not None else None,
-            dst=str(dst) if dst is not None else None,
-            raw_hex=bytes(packet).hex(),
+            src=src,
+            dst=dst,
+            raw_hex=packet_bytes.hex(),
         )
 
 
