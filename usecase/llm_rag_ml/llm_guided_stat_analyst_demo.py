@@ -277,6 +277,7 @@ class AnalysisRequest:
     planner: str
     execution_mode: str
     model: str
+    reasoning_effort: str
     dataset: Optional[str] = None
 
 
@@ -595,7 +596,10 @@ class DemoAnalyst:
                         return repaired
                     logger.warning("LLM repaired plan still invalid: %s", "; ".join(repaired_errors))
 
-            logger.warning("LLM planner unavailable/failed/invalid; falling back to heuristic planner")
+            raise ValueError(
+                "LLM planner failed to produce a valid analysis plan. "
+                "Check LLM backend availability, model configuration, prompt compatibility, and planner logs."
+            )
         return self._heuristic_plan(request.question, request.dataset)
 
     def _llm_plan(self, request: AnalysisRequest, *, validation_errors: Optional[List[str]]) -> Optional[Dict[str, Any]]:
@@ -740,7 +744,7 @@ class DemoAnalyst:
             model=request.model,
             messages=messages,
             response_format={"type": "json_schema", "json_schema": plan_schema},
-            reasoning_effort="minimal",
+            reasoning_effort=request.reasoning_effort,
             question=request.question,
         )
         if content is None:
@@ -1145,6 +1149,7 @@ def build_llm_report(
     facts: Dict[str, Any],
     anomalies: List[Dict[str, Any]],
     model: str,
+    reasoning_effort: str,
     llm_backend: LLMBackend,
 ) -> Optional[str]:
     if not llm_backend.available():
@@ -1175,7 +1180,7 @@ def build_llm_report(
     content = llm_backend.create_report(
         model=model,
         messages=messages,
-        reasoning_effort="minimal",
+        reasoning_effort=reasoning_effort,
         question=question,
     )
     if content is None:
@@ -1206,6 +1211,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--planner", choices=["heuristic", "llm"], default=argparse.SUPPRESS)
     parser.add_argument("--execution-mode", choices=["plan", "python"], default=argparse.SUPPRESS)
     parser.add_argument("--model", default=argparse.SUPPRESS)
+    parser.add_argument(
+        "--reasoning-effort",
+        default=argparse.SUPPRESS,
+        help="LLM reasoning effort to use for planner and report generation (for example: minimal, low, medium, high)",
+    )
     parser.add_argument(
         "--llm-backend",
         choices=["openai", "mock-file"],
@@ -1250,6 +1260,7 @@ def parse_args() -> argparse.Namespace:
         "planner": "heuristic",
         "execution_mode": "plan",
         "model": "gpt-5-nano",
+        "reasoning_effort": "minimal",
         "llm_backend": "openai",
         "mock_llm_responses_file": None,
         "dataset": None,
@@ -1292,6 +1303,7 @@ def write_reports(
     output: Dict[str, Any],
     question: str,
     llm_model: str,
+    reasoning_effort: str,
     llm_backend: LLMBackend,
 ) -> Dict[str, str]:
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -1304,6 +1316,7 @@ def write_reports(
         facts=output["facts"],
         anomalies=output["anomalies"],
         model=llm_model,
+        reasoning_effort=reasoning_effort,
         llm_backend=llm_backend,
     )
     if llm_summary:
@@ -1328,68 +1341,74 @@ def write_reports(
 
 
 def main() -> None:
-    args = parse_args()
-    configure_logging(args.log_level, log_to=args.log_to, log_file=args.log_file)
+    try:
+        args = parse_args()
+        configure_logging(args.log_level, log_to=args.log_to, log_file=args.log_file)
 
-    # Optionally allow OPENAI_API_KEY to be provided via config.
-    config_key = getattr(args, "openai_api_key", None)
-    if config_key:
-        if os.getenv("OPENAI_API_KEY"):
-            logger.info("OPENAI_API_KEY already set in environment; ignoring config value")
+        # Optionally allow OPENAI_API_KEY to be provided via config.
+        config_key = getattr(args, "openai_api_key", None)
+        if config_key:
+            if os.getenv("OPENAI_API_KEY"):
+                logger.info("OPENAI_API_KEY already set in environment; ignoring config value")
+            else:
+                os.environ["OPENAI_API_KEY"] = str(config_key)
+                logger.info("OPENAI_API_KEY set from JSON config")
+
+        logger.info("CLI args=%s", _json_dumps_safe(_redact_secrets(vars(args))))
+        llm_backend = create_llm_backend(
+            args.llm_backend,
+            mock_llm_responses_file=getattr(args, "mock_llm_responses_file", None),
+        )
+        analyst = DemoAnalyst(Path(args.data_dir), llm_backend=llm_backend)
+        req = AnalysisRequest(
+            question=args.question,
+            planner=args.planner,
+            execution_mode=args.execution_mode,
+            model=args.model,
+            reasoning_effort=args.reasoning_effort,
+            dataset=getattr(args, "dataset", None),
+        )
+        logger.info("AnalysisRequest=%s", _json_dumps_safe(req.__dict__))
+
+        if req.execution_mode == "python":
+            output = analyst.execute_python(req.question)
+            plan: Dict[str, Any] = {"execution_mode": "python"}
         else:
-            os.environ["OPENAI_API_KEY"] = str(config_key)
-            logger.info("OPENAI_API_KEY set from JSON config")
+            plan = analyst.generate_plan(req)
+            has_plot = bool(plan.get("plot"))
+            if args.skip_plot_generation and has_plot:
+                logger.info("Skipping plot generation by configuration despite plot in plan")
+            elif not has_plot:
+                logger.info("Plan has no plot config; skipping plot generation")
+            plot_out = (Path(args.output_dir) / "plot.png") if (has_plot and not args.skip_plot_generation) else None
+            output = analyst.execute_plan(plan=plan, question=req.question, plot_out=plot_out)
+        logger.info("Run complete facts=%s", _json_dumps_safe(output.get("facts")))
+        artifacts = write_reports(
+            Path(args.output_dir),
+            plan=plan,
+            output=output,
+            question=req.question,
+            llm_model=req.model,
+            reasoning_effort=req.reasoning_effort,
+            llm_backend=llm_backend,
+        )
+        logger.info("Artifacts written=%s", _json_dumps_safe(artifacts))
 
-    logger.info("CLI args=%s", _json_dumps_safe(_redact_secrets(vars(args))))
-    llm_backend = create_llm_backend(
-        args.llm_backend,
-        mock_llm_responses_file=getattr(args, "mock_llm_responses_file", None),
-    )
-    analyst = DemoAnalyst(Path(args.data_dir), llm_backend=llm_backend)
-    req = AnalysisRequest(
-        question=args.question,
-        planner=args.planner,
-        execution_mode=args.execution_mode,
-        model=args.model,
-        dataset=getattr(args, "dataset", None),
-    )
-    logger.info("AnalysisRequest=%s", _json_dumps_safe(req.__dict__))
-
-    if req.execution_mode == "python":
-        output = analyst.execute_python(req.question)
-        plan: Dict[str, Any] = {"execution_mode": "python"}
-    else:
-        plan = analyst.generate_plan(req)
-        has_plot = bool(plan.get("plot"))
-        if args.skip_plot_generation and has_plot:
-            logger.info("Skipping plot generation by configuration despite plot in plan")
-        elif not has_plot:
-            logger.info("Plan has no plot config; skipping plot generation")
-        plot_out = (Path(args.output_dir) / "plot.png") if (has_plot and not args.skip_plot_generation) else None
-        output = analyst.execute_plan(plan=plan, question=req.question, plot_out=plot_out)
-    logger.info("Run complete facts=%s", _json_dumps_safe(output.get("facts")))
-    artifacts = write_reports(
-        Path(args.output_dir),
-        plan=plan,
-        output=output,
-        question=req.question,
-        llm_model=req.model,
-        llm_backend=llm_backend,
-    )
-    logger.info("Artifacts written=%s", _json_dumps_safe(artifacts))
-
-    print("=== PLAN ===")
-    print(json.dumps(plan, indent=2))
-    print("\n=== FACTS ===")
-    print(json.dumps(output["facts"], indent=2, default=str))
-    print("\n=== SUMMARY ===")
-    print(build_narrative(output["facts"], output["anomalies"]))
-    print("\n=== INCIDENT REPORT ===")
-    print(build_incident_report(req.question, output["facts"], output["anomalies"]))
-    print("\n=== RESULT PREVIEW ===")
-    print(output["table"].head(10).to_string(index=False))
-    print("\n=== ARTIFACTS ===")
-    print(json.dumps(artifacts, indent=2))
+        print("=== PLAN ===")
+        print(json.dumps(plan, indent=2))
+        print("\n=== FACTS ===")
+        print(json.dumps(output["facts"], indent=2, default=str))
+        print("\n=== SUMMARY ===")
+        print(build_narrative(output["facts"], output["anomalies"]))
+        print("\n=== INCIDENT REPORT ===")
+        print(build_incident_report(req.question, output["facts"], output["anomalies"]))
+        print("\n=== RESULT PREVIEW ===")
+        print(output["table"].head(10).to_string(index=False))
+        print("\n=== ARTIFACTS ===")
+        print(json.dumps(artifacts, indent=2))
+    except Exception as exc:
+        logging.getLogger("llm_guided_stat_analyst_demo").error("Run failed: %s", exc)
+        raise SystemExit(1) from None
 
 
 if __name__ == "__main__":

@@ -258,3 +258,13 @@ python usecase/llm_rag_ml/llm_guided_stat_analyst_demo.py \
 ```
 
 The script writes a default plot artifact to `usecase/llm_rag_ml/artifacts/latest_plot.png`.
+
+OpenAI models
+Variant	Best for
+gpt-5.4	General-purpose work, including complex reasoning, broad world knowledge, and code-heavy or multi-step agentic tasks
+gpt-5.4-pro	Tough problems that may take longer to solve and need deeper reasoning
+gpt-5.4-mini	High-volume coding, computer use, and agent workflows that still need strong reasoning
+gpt-5.4-nano	Simple high-throughput tasks where speed and cost matter most
+
+Ref: 
+https://developers.openai.com/api/docs/guides/latest-model#migration-guidance
